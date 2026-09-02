@@ -7,8 +7,7 @@ import (
 	"testing"
 )
 
-// useTempXDG points every XDG base directory at a fresh temporary tree so that
-// tests never touch the developer's real configuration.
+// useTempXDG isolates a test from the developer's real configuration.
 func useTempXDG(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
@@ -156,8 +155,7 @@ func TestLoadRejectsBadConfigs(t *testing.T) {
 	}
 }
 
-// A feed with no explicit name is labelled by its host, since that string
-// appears next to every post the feed produces.
+// An unnamed feed is labelled by its host, which appears beside every post.
 func TestNormalizeDerivesNameFromHost(t *testing.T) {
 	tests := []struct {
 		name string

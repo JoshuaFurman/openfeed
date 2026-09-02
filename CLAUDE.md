@@ -119,9 +119,18 @@ We are not shipping to a deadline. Investing 10–20% extra time in design is th
 
 Comments exist to record what the code **cannot** say. If a comment repeats the code, delete it.
 
+**Terse and functional.** Prose in comments does not age well and it is not where design rationale belongs. Hard budgets:
+
+- Doc comment: **≤ 2 sentences.** A third only to state an invariant or a constraint a caller can violate.
+- Implementation comment: **1 line.** If it needs a paragraph, the code needs a better name or a smaller function.
+- Package comment: what the package is for, plus the one thing a reader must know before using it. Not an essay.
+
+A comment that explains *why we rejected the alternative* over several lines belongs in this file, under §2, with at most a pointer from the source. The source says what is true; `CLAUDE.md` says why we chose it.
+
 - Write the **interface comment first**, before the implementation. If it's hard to write, the design is wrong — fix the design, not the comment.
 - Interface comments describe *what and why*. Implementation comments describe *how*. Never mix them; implementation detail in an interface comment is information leakage.
 - Comment the non-obvious: units, invariants, why an alternative was rejected, why an ugly workaround exists.
+- Do not restate the signature. `// Load reads and validates config.toml` earns its place; `// Load loads the config` does not.
 
 ### Red flags
 

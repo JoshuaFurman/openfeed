@@ -15,11 +15,6 @@ func main() {
 	}
 }
 
-// run is separated from main so that every failure path returns an error
-// instead of calling os.Exit, which would skip deferred cleanup.
-//
-// This is temporary scaffolding for v0.1: it reports what config.Load resolved
-// so the package can be exercised before the store and TUI exist.
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {

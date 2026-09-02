@@ -1,9 +1,8 @@
-// Package config loads openfeed's user-owned settings and locates the files
-// openfeed reads and writes.
+// Package config loads openfeed's settings and locates the files it reads and
+// writes.
 //
-// The configuration file is the source of truth for intent: which feeds the
-// user subscribes to. Everything openfeed stores in its database is derived
-// from that intent and may be deleted at any time without loss.
+// config.toml is the source of truth for intent. Everything in the database is
+// derived from it and may be deleted without loss.
 package config
 
 import (
@@ -24,20 +23,18 @@ type Feed struct {
 	Tags []string `toml:"tags"`
 }
 
-// Config is openfeed's resolved configuration.
-//
-// Construct it with Load; the zero value is not usable.
+// Config is openfeed's resolved configuration. Construct it with Load; the
+// zero value is not usable.
 type Config struct {
-	// Feeds are in the order they appear in config.toml. Reading order in the
-	// timeline is chronological and unrelated to this ordering.
+	// Feeds are in config.toml order. The timeline is chronological and
+	// ignores it.
 	Feeds []Feed `toml:"feed"`
 
 	paths paths
 }
 
-// starterConfig is written on first run. It is valid TOML that subscribes to
-// nothing, so a first launch succeeds and shows an empty timeline rather than
-// failing.
+// starterConfig is written on first run: valid TOML subscribing to nothing, so
+// a fresh install launches to an empty timeline instead of an error.
 const starterConfig = `# openfeed configuration
 #
 # This file is the source of truth for what you read. openfeed's database is
@@ -52,16 +49,11 @@ const starterConfig = `# openfeed configuration
 # tags = ["tech"]
 `
 
-// Load reads and validates config.toml.
+// Load reads and validates config.toml, writing a commented starter file if
+// none exists.
 //
-// A missing configuration file is not an error. On first run Load writes a
-// commented starter config and returns it, so that openfeed is runnable
-// immediately after installation.
-//
-// Load rejects the whole file if any subscription is malformed. Skipping a bad
-// entry would mean silently unsubscribing the user from a feed they believe
-// they are reading; a startup error naming the offending block is easier to act
-// on than posts that never arrive.
+// One malformed subscription fails the whole load: skipping it would silently
+// unsubscribe the user from a feed they believe they are reading.
 func Load() (*Config, error) {
 	p, err := resolvePaths()
 	if err != nil {
@@ -84,8 +76,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", cfg.FilePath(), err)
 	}
-	// Unknown keys are usually typos in a hand-edited file. Reporting them
-	// beats letting a misspelled setting be silently ignored.
+	// Unknown keys are almost always typos in a hand-edited file.
 	if unknown := md.Undecoded(); len(unknown) > 0 {
 		return nil, fmt.Errorf("%s: unknown setting %q", cfg.FilePath(), unknown[0].String())
 	}
@@ -95,21 +86,18 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// FilePath reports where config.toml lives. It is valid even when the file
-// does not exist yet, so callers can name it in messages.
+// FilePath reports where config.toml lives, whether or not it exists yet.
 func (c *Config) FilePath() string { return filepath.Join(c.paths.config, "config.toml") }
 
-// DatabasePath reports where openfeed's derived state is stored. Deleting this
-// file discards cached posts and reading position, but no subscriptions.
+// DatabasePath reports where derived state is stored. Deleting that file
+// discards cached posts and reading position, but no subscriptions.
 func (c *Config) DatabasePath() string { return filepath.Join(c.paths.data, "openfeed.db") }
 
 // LogPath reports where openfeed writes its log.
 func (c *Config) LogPath() string { return filepath.Join(c.paths.state, "openfeed.log") }
 
-// normalize validates every subscription and rejects duplicates.
-//
-// Feeds are reported by their 1-based position because a [[feed]] block has no
-// stable identifier until it has been normalized.
+// normalize validates every subscription and rejects duplicates. Errors name a
+// feed by 1-based position, the only identifier a [[feed]] block has.
 func (c *Config) normalize() error {
 	seenAt := make(map[string]int, len(c.Feeds))
 	for i := range c.Feeds {
@@ -124,10 +112,8 @@ func (c *Config) normalize() error {
 	return nil
 }
 
-// normalize validates one subscription and fills in any derived defaults.
-//
-// It runs at load time and must not perform network access: openfeed has to
-// start correctly while offline.
+// normalize validates one subscription and fills in derived defaults. It must
+// not touch the network; openfeed has to start offline.
 func (f *Feed) normalize() error {
 	f.URL = strings.TrimSpace(f.URL)
 	if f.URL == "" {
@@ -143,10 +129,8 @@ func (f *Feed) normalize() error {
 	if u.Host == "" {
 		return fmt.Errorf("url %q: missing host", f.URL)
 	}
-	// url.Parse preserves the host's case, but DNS does not distinguish it.
-	// Lowering it here makes duplicate detection reliable and lets any later
-	// derivation match on a predictable host. The path is left untouched
-	// because it is genuinely case-sensitive.
+	// url.Parse preserves host case; DNS ignores it. Lowering makes duplicate
+	// detection reliable. Paths are left alone — they are case-sensitive.
 	u.Host = strings.ToLower(u.Host)
 	f.URL = u.String()
 
