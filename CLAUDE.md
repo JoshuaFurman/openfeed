@@ -52,10 +52,17 @@ The DB lives in `DATA`, not `CACHE`, because seen-position is not regenerable an
 url  = "https://lobste.rs/rss"
 name = "lobsters"
 tags = ["tech"]
-
-[ui]
-# ...
 ```
+
+### Invariants established by `config.Load`
+
+Downstream packages may rely on these and should not re-check them:
+
+- Every `Feed.URL` is absolute, `http`/`https`, and has a host.
+- Hosts are lowercased. `url.Parse` preserves case but DNS does not, so normalizing here is what makes duplicate detection and any later host comparison correct. Paths are left alone — they *are* case-sensitive.
+- No two feeds share a URL.
+- `Feed.Name` is never empty; it falls back to the host with any `www.` prefix stripped. No renderer needs a blank-label branch.
+- A malformed subscription fails the whole load. Silently skipping one would unsubscribe the user from a feed they believe they are reading.
 
 ---
 
@@ -153,8 +160,8 @@ Prefer interfaces that are somewhat more general than today's need — usually *
 Subject to revision — this is a sketch, not a contract.
 
 ```
-cmd/openfeed/         thin main: construct deps, hand off to cli
-internal/config/      XDG paths, config.toml load/save
+cmd/openfeed/         thin main: construct deps, hand off to cli      ✅ scaffold
+internal/config/      XDG paths, config.toml load/validate            ✅ done
 internal/feed/        fetch + parse + normalize (gofeed), conditional GET
 internal/store/       SQLite; domain-shaped API; embedded migrations
 internal/reader/      orchestration — the core seam (see §3)
@@ -165,21 +172,40 @@ internal/ai/          Provider interface + no-op              [later]
 internal/cli/         cobra commands
 ```
 
-> `cmd/rss/` is a leftover from scaffolding and should be renamed `cmd/openfeed/`.
->
 > `article` may well collapse into `feed` — resist the urge to keep five shallow packages when two deep ones would do.
 
 ### Dependencies
 
 Added only when first genuinely needed. Each new dependency is a decision to justify, not a default.
 
-`bubbletea` · `bubbles` · `lipgloss` · `cobra` · `gofeed` · `modernc.org/sqlite` · a TOML library · `go-readability` *(later)*
+| Package | Status | Why this one |
+|---|---|---|
+| `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
+| `bubbletea` · `bubbles` · `lipgloss` | planned | TUI |
+| `cobra` | planned | CLI |
+| `mmcdole/gofeed` | planned | RSS/Atom/JSON Feed parsing |
+| `modernc.org/sqlite` | planned | pure-Go, no cgo (see §2) |
+| `go-shiori/go-readability` | later | article extraction |
+
+### Tooling
+
+`mise.toml` pins Go. `staticcheck` must be installed from source against the current toolchain — an older binary fails with `unsupported version: 2` on Go 1.26 export data:
+
+```
+go install honnef.co/go/tools/cmd/staticcheck@latest
+```
 
 ---
 
 ## 5. Roadmap
 
 ### v0.1 — read-only river *(current)*
+
+- [x] `internal/config` — XDG paths, cold-start bootstrap, validation
+- [ ] `internal/feed` — fetch + parse into normalized items
+- [ ] `internal/store` — schema, migrations, upsert, timeline query
+- [ ] `internal/reader` — the core seam
+- [ ] `internal/tui` — river rendering, `j`/`k`, `o`, seen divider
 
 Done when:
 
@@ -208,6 +234,13 @@ Reader pane with on-demand extraction · feed management commands & OPML import/
 - When a design decision has multiple valid answers — error-handling strategy, data structure choice, key business logic — **hand it to the human.** Leave a single `TODO(human)` in the code with surrounding context built out, and explain the trade-offs. This project is partly a learning exercise; that is a feature, not overhead.
 - Explain *why*, not just *what*. Insights about the codebase and the reasoning behind choices are part of the deliverable.
 
+### Commits
+
+Conventional Commits, and keep them short. `feat(config): ...`, `fix(store): ...`,
+`chore:`, `docs:`. Subject line does the work; a body only when the *why* is
+genuinely non-obvious, and then a couple of lines. Unrelated changes get
+separate commits.
+
 ### Definition of done for an increment
 
 1. `gofmt`, `go vet`, `staticcheck` clean.
@@ -220,8 +253,8 @@ Reader pane with on-demand extraction · feed management commands & OPML import/
 
 ## 7. Open questions
 
-- **License** — MIT proposed, not yet chosen.
-- **Git** — repo not yet initialized.
+- **Naming provenance** — `config.Load` derives `Feed.Name` from the host when the user gives none, and afterwards nothing can distinguish "the user typed `theverge.com`" from "we derived it." When `internal/feed` fetches the feed's own `<title>`, it will need to know whether overwriting is allowed. Options: keep the raw config value alongside the derived one, carry a `nameIsDerived` flag, or defer derivation to the render layer so the config value stays untouched. Decide before `feed` writes anything back.
+- **`Item` ownership** — `Item` is produced by `feed`, persisted by `store`, served by `reader`, rendered by `tui` and `server`. A shared `types` package would be an anemic, shallow module; having everyone import `feed` puts a fetching package in the web server's dependency graph. Needs a design-it-twice before `feed` is written.
 - **TOML round-tripping** — `openfeed add` must eventually rewrite `config.toml` without destroying the user's comments and formatting. No Go library does this cleanly. Deferred: v0.1's config is read-only.
 - **Retention** — how long do items stay in the DB? Unbounded growth is not a plan.
 - **Refresh policy** — on launch? background ticker? manual only? Interacts with being a good citizen toward feed servers.
