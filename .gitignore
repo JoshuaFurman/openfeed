@@ -1,0 +1,25 @@
+# Compiled binary. `go build ./cmd/openfeed` drops it in the repo root.
+/openfeed
+/dist/
+
+# Go build and test artifacts
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local runtime state, if anyone points XDG_* at the working tree while debugging
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Agent tooling: personal, machine-local settings
+.claude/settings.local.json
