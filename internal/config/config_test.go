@@ -81,10 +81,12 @@ func TestRelativeXDGValueFallsBackToHome(t *testing.T) {
 	useTempXDG(t)
 	t.Setenv("XDG_CONFIG_HOME", "relative/path")
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("no home directory available: %v", err)
-	}
+	home := t.TempDir()
+	// os.UserHomeDir uses HOME on Unix, USERPROFILE on Windows, and home on Plan 9.
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("home", home)
+
 	p, err := resolvePaths()
 	if err != nil {
 		t.Fatalf("resolvePaths: %v", err)
