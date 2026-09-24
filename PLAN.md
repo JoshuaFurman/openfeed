@@ -6,25 +6,26 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, and atomic
-  refresh persistence. `FeedState`/`SaveRefresh` persist items and validators against versioned
-  snapshots; stale outcomes cannot overwrite an accepted refresh. Settled decisions are in `AGENTS.md`.
+- **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
+  persistence, and chronological-range timeline queries across selected active subscriptions.
+  Settled decisions and the timeline contract are in `AGENTS.md`.
 - **Current behavior:** `openfeed` still bootstraps/loads config and prints paths and subscriptions.
-  Fetching and persistence are tested libraries, not wired into the command. Schema version 2 adds
-  feed/item storage; timeline queries, reading position, reader orchestration, and TUI do not exist yet.
-- **Review completed:** the refresh API, overlap policy, schema, and timestamp representation were
-  approved before implementation. Final review checked duplicate/date semantics, transaction cleanup,
-  public errors, and migration isolation; added metadata/commit-failure rollback coverage.
-- **Next action:** compare offset versus cursor pagination for a deterministic newest-first river
-  across active config URLs. Settle tie-breaking and behavior under insertion/date corrections before
-  implementing queries; keep seen state and reader/command wiring in separate increments.
-- **Implementation in progress:** none. Atomic refresh persistence is implemented, verified, and
-  uncommitted; no known blockers. The preceding lifecycle/design work is committed in `4010aaa`.
-- **Last verification:** formatting, uncached race and no-cgo tests, `go vet`, `staticcheck`,
-  `go mod verify`, and `git diff --check` passed. Store coverage is 92.2% in the no-cgo run.
-  Concurrent opens, competing/stale refreshes, rollback, and lock release/cancellation/deadline tests
-  passed 100 race-detector runs. Store tests cross-compile without cgo for Linux/amd64 and Windows/amd64
-  (compile checks only; runtime verification was on macOS/arm64).
+  Fetching, persistence, and timeline queries are tested libraries, not wired into the command.
+  Schema version 3 adds the timeline index; seen state, reader orchestration, and TUI do not exist yet.
+- **Review completed:** reviewed all timeline changes against the approved contract for correctness,
+  API/design, reliability/tests, performance, and security; no blocking findings. Cursor scope remains
+  a caller constraint, and tied/inactive index scans and live date-correction effects remain documented
+  trade-offs. This review changed only the handoff; verification below is from implementation.
+- **Next action:** commit the reviewed timeline increment, then design persisted seen-position
+  representation and advancement, including ties and publication-date corrections. Do not implicitly
+  persist the in-memory pagination cursor as the seen-state format; reader/command wiring is separate.
+- **Implementation in progress:** none. Timeline queries and their design records are implemented,
+  verified, and uncommitted; no known blockers. Atomic refresh persistence is committed in `f91a737`.
+- **Last verification:** formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`,
+  `go mod verify`, and `git diff --check` passed. Store coverage is 93.4% in the no-cgo run.
+  Timeline insertion/correction, range refresh, cursor reopen/upgrade, cancellation, WAL, and concurrent
+  query tests passed 25 race-detector runs. Store tests cross-compile without cgo for Linux/amd64 and
+  Windows/amd64 (compile checks only; runtime verification was on macOS/arm64).
 
 ### Keeping this useful
 
@@ -66,13 +67,34 @@ Complete these as reviewed increments, not one large change:
 - [x] **Persist refresh outcomes.** Added migration `002_refresh.sql`, versioned feed snapshots,
   and atomic item/validator persistence. Enforces per-subscription identity, approved duplicate/date
   rules, unchanged-outcome handling, stale-snapshot rejection, and rollback without advancing state.
-- [ ] **Query the river.** Return a deterministic newest-first timeline with bounded pagination
-  across active subscriptions. Keep SQL, ordering, and deduplication inside the store.
+- [x] **Query the river.** Added store-owned timeline models, live date/ID cursors, exclusive/inclusive
+  range bounds, 50/200 page limits, and migration `003_timeline.sql`. Queries select active URLs without
+  changing cached data and support head-span reloads plus continued older-history loading.
 - [ ] **Persist reading position.** Save/load the agreed seen-position representation across runs.
 
-**Next design comparison:** offset versus cursor pagination across active subscriptions, including
-stable tie-breakers and the effects of refresh insertions or publication-date corrections between pages.
-Do not implicitly promise a frozen snapshot while querying a changing river.
+**Timeline implementation:** [`internal/store/timeline.go`](internal/store/timeline.go) implements the
+approved [timeline read contract](AGENTS.md#timeline-reads). Actual SQLite query plans confirm ordered
+index scans for head reads and date seeks for bounded reads, without a global sort, in tie-heavy and
+sparse-active fixtures. No reader reconciliation, viewport behavior, or refresh scheduling is wired yet.
+
+**Next design comparison:** choose the saved chronological seen-position representation and when it
+advances. Pagination has an opaque observed position, but its existence does not settle divider ties,
+advancement, or the persisted seen-state format.
+
+**Timeline acceptance coverage:**
+
+- `internal/store/timeline_test.go`: active/empty/uncached visibility, literal and repeated URLs,
+  independent cross-subscription identities, unchanged cache contents, deterministic multi-page ties,
+  limits/exhaustion, inclusive/exclusive range edges, publication/fallback transitions, and UTC
+  nanosecond/extreme-year results and boundaries.
+- `internal/store/timeline_refresh_test.go`: above/below/tied insertions between pages, observed cursor
+  independence after moved/deleted boundary rows and reopen, repeats/skips from date corrections,
+  a 125-post head refresh with interior discoveries/corrections, resuming older history afterward,
+  and exhaustion that does not hide a later discovery. Boundary deletion is test-only, not a new API.
+- `internal/store/timeline_sql_test.go`: version-2 upgrade without data changes, cursor reuse across
+  reopen, invalid queries, public errors without partial pages, cancellation during execution and
+  connection waits, WAL reads during writes, concurrent page consistency, 40,000-URL selections,
+  and query plans for each boundary combination in tied/sparse fixtures.
 
 **Reader integration notes:**
 
@@ -84,6 +106,10 @@ Do not implicitly promise a frozen snapshot while querying a changing river.
   using the approved transition table. First-fetch time is not a commit/arrival watermark.
 - Config owns active URLs, names, and tags. Cached feed metadata must not become a subscription list;
   the future reader should adapt fetched data into store-owned inputs and attach config labels.
+- Reload/reconcile loaded timeline spans by identity after refreshes; a fresh head page is not
+  automatically adjacent to old history. Preserve a fetchable path across unfinished refresh spans,
+  and handle selected items moving outside them. Nil `Next` exhausts the requested interval for now,
+  not all history; exact staging and viewport mechanics belong to reader/TUI work.
 - Existing config comments and the source-of-truth decision overstate deletion as lossless; reading
   position is explicitly non-regenerable elsewhere. Reconcile that wording when settling seen state.
 
@@ -101,13 +127,13 @@ Do not implicitly promise a frozen snapshot while querying a changing river.
 - Lifecycle tests now follow the embedded migration count; migration-engine tests start from an
   isolated bookkeeping-only schema so future domain migrations do not change their fixtures.
 
-**Later query/seen-state cases:** late-discovered dated posts sort by publication, not discovery;
-publication corrections can move existing items. A chronological divider must not claim to separate
-all newly discovered posts. Cover timestamp ties when choosing pagination and seen cursors.
+**Seen-state cases:** late-discovered dated posts sort by publication, not discovery; corrections
+can move existing items across a divider. The divider must not claim to separate all newly discovered
+posts. Cover timestamp ties when choosing its representation and advancement rules.
 
-**Remaining storage verification:** active-subscription visibility, deterministic pagination with
-identical timestamps and intervening refreshes, and saved reading position surviving reopen. Public
-errors and results must not expose SQL types. Apply the quality gates in `AGENTS.md` to each increment.
+**Remaining storage verification:** saved reading position surviving reopen and its agreed boundary/
+advancement behavior. Public errors and results must not expose SQL types. Apply the quality gates in
+`AGENTS.md` to each increment.
 
 **Still deferred:** launch refresh, scheduling, rendering, full-text extraction, search, web serving,
 or AI. Do not introduce their packages or schema speculatively.
@@ -126,6 +152,9 @@ The article operation remains deferred until there is a reader pane.
 ### Then: `internal/tui`
 
 - [ ] Render one chronological river from the reader API, with config-owned source labels.
+- [ ] Automatically load older history while scrolling and reconcile refreshed results without
+  silent head/history gaps or duplicate visible identities; implement the agreed position-preserving
+  refresh behavior and settle anchor-movement edge cases before implementation.
 - [ ] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
 - [ ] Show the seen divider and persist the agreed position as the user reads/exits.
 - [ ] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
@@ -150,9 +179,8 @@ Resolve a question before the work it affects, not every future question up fron
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| Timeline pagination | Timeline query | Offset versus cursor pagination, with a deterministic tie-breaker and behavior when refresh inserts items between pages. |
 | Seen-position representation and advancement | Seen-state schema and UI | Chronological semantics are settled. Choose the saved cursor/tie-breaker, when it advances, behavior when publication corrections move items across it, and truthful divider wording. No arrival watermark, per-item unread flags, or unread counts. |
-| Retention and removed subscriptions | Querying; explicit policy before v0.1 completion | Refreshes do not prune or delete omitted items. Decide how to bound growth, whether to retain removed feeds' cached posts, and how active config controls visibility. Subscriptions never become DB-owned. |
+| Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. |
 | Refresh policy | Reader orchestration | Launch, manual, and/or periodic refresh; bounded concurrency and polite behavior toward feed servers without blocking cached reading. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 
