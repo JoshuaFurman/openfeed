@@ -6,7 +6,7 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Configuration loading and the feed-fetching module work; storage and the timeline UI do not exist yet.
+> Configuration loading, feed fetching, and database lifecycle/migrations work; post persistence and the timeline UI do not exist yet.
 > The CLI still only prints resolved configuration. [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
@@ -16,8 +16,9 @@ Most RSS readers are filing cabinets — folders, unread counts, an inbox to cle
 terminal, with no backlog guilt.
 
 - **One view.** Feeds and tags are filters over the river, not separate destinations.
-- **No unread counts.** A `── 12 new since 09:15 ──` divider marks where you left off. Nothing is
-  bold, nothing is a badge, nothing needs clearing. Items age out of the top on their own.
+- **No unread counts.** A divider marks where you left off in the chronological river, not which
+  posts arrived since your last visit. Nothing is bold, nothing is a badge, nothing needs clearing.
+  Items age out of the top on their own.
 - **Your sources, in a text file.** Subscriptions live in a hand-editable `config.toml` you can
   grep, diff, and commit. Nothing is algorithmic unless you ask for it.
 - **The database is a cache.** `rm openfeed.db` loses cached posts and your reading position —

@@ -6,15 +6,31 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** configuration and the standalone feed-fetching module. The latest implementation
-  commit is `6d0f6ac` (`feat(feed): fetch and normalize feeds with stable item keys`).
-- **Current behavior:** `openfeed` bootstraps/loads config and prints paths and subscriptions.
-  Fetching is tested but not wired into the command. There is no database or TUI yet.
-- **Next action:** discuss the store's domain API and schema, then implement its first small increment.
-  Start with the store design questions below; do not build the reader or TUI alongside it.
-- **Implementation in progress:** none.
-- **Last code verification:** the feed increment passed formatting, tests with the race detector,
-  tests with cgo disabled, `go vet`, and `staticcheck`. Re-run relevant checks after code changes.
+- **Completed:** configuration, standalone feed fetching, and the first `internal/store` increment:
+  database lifecycle, transactional embedded migrations, and contention/cancellation handling.
+  The duplicate-key, publisher-update, and publication/first-fetch semantics are now approved
+  and recorded in `AGENTS.md`; persistence itself is not implemented.
+- **Current behavior:** `openfeed` still bootstraps/loads config and prints paths and subscriptions.
+  Fetching and storage are tested libraries, not wired into the command. The database schema contains
+  migration bookkeeping only; there are no persisted posts, reading position, or TUI yet.
+- **Review completed:** all existing code, tests, fixtures, project guidance, dependencies, and CI
+  reviewed before storage. The atomic refresh boundary and lifecycle-only scope were approved;
+  settled storage decisions are recorded in `AGENTS.md`.
+- **Next action:** review the exact store-owned refresh inputs/results and feed/item schema,
+  including changed/unchanged outcomes, timestamp representation, and overlapping same-feed
+  refreshes. Then implement atomic persistence against the approved semantics and acceptance cases
+  below; keep reader/command wiring, querying, and seen-state implementation in later increments.
+- **Implementation in progress:** none. The lifecycle increment remains implemented and uncommitted;
+  this increment changes design documentation only. Remaining work is API/schema design, not a
+  blocker in the lifecycle implementation.
+- **This increment's verification:** reviewed the existing fetcher, normalization tests, and store
+  lifecycle against the decisions; aligned the README's divider description and passed
+  `git diff --check`. No code/schema changes or new executable tests; code quality gates were not
+  re-run for this documentation-only increment.
+- **Last code verification:** formatting, uncached race and no-cgo tests, `go vet`, `staticcheck`,
+  and `go mod verify` passed. Concurrent-open/WAL/lock-release tests passed 100 race-detector runs;
+  store coverage is 87.2%. Store tests cross-compile without cgo for Linux/amd64 and Windows/amd64
+  (compile checks only; runtime verification was on macOS/arm64). CI now also tests with cgo disabled.
 
 ### Keeping this useful
 
@@ -41,10 +57,17 @@ reading position. A failed refresh must not prevent reading cached posts.
 
 Complete these as reviewed increments, not one large change:
 
-- [ ] **Design the boundary.** Define store-owned models, the consumer-facing operations, schema,
-  and conversion responsibilities without importing HTTP/parser types into the persistence API.
-- [ ] **Open and migrate.** Add `modernc.org/sqlite`, embedded hand-written migrations, database
-  lifecycle handling, and reopen/migration tests using temporary databases.
+- [x] **Choose the boundary.** Atomic refresh persistence with store-owned inputs; the future reader
+  adapts fetched results, while config owns active subscriptions and labels.
+- [x] **Open and migrate.** Added `modernc.org/sqlite`, embedded hand-written migrations, lifecycle
+  handling, private-directory creation, literal-path handling, and temporary-database tests. Covers
+  reopen, upgrades, whole-batch rollback, newer-schema rejection without modification, concurrent
+  opens, WAL readers, connection replacement, and bounded/cancellable lock waits.
+- [x] **Settle item update and time semantics.** Approved duplicate winners, whole-item publisher
+  replacement, immutable first-fetch state, and publication/fallback chronology versus discovery.
+  See [`AGENTS.md` refresh item semantics](AGENTS.md#refresh-item-semantics).
+- [ ] **Design refresh models and schema.** Define exact inputs/results, feed/item tables, and time
+  representation without importing HTTP/parser types into the persistence API.
 - [ ] **Persist refresh outcomes.** Store items and validators atomically; enforce uniqueness on
   `(configured feed URL, item key)`; update existing entries and preserve first-fetch dates.
   A 304 updates metadata without replacing items; failed refreshes leave cached state untouched.
@@ -52,10 +75,47 @@ Complete these as reviewed increments, not one large change:
   across active subscriptions. Keep SQL, ordering, and deduplication inside the store.
 - [ ] **Persist reading position.** Save/load the agreed seen-position representation across runs.
 
-**First design comparison:** one domain operation that commits a feed's refresh outcome versus
-fine-grained item/validator writes coordinated by the caller. Prefer the atomic domain operation:
-callers should not have to know that committing validators before items can lose posts. The exact
-API and models still need to be designed before implementation.
+**Next design review:** compare concrete store-owned contracts for changed versus unchanged
+refreshes, then define the feed/item schema and timestamp representation. Include how overlapping
+same-feed refreshes interact; request-start timestamps are not assumed to be monotonic version
+numbers. The atomic boundary and item/time behavior are settled in `AGENTS.md`; no domain API or
+schema has been implemented.
+
+**Pre-implementation review notes:**
+
+- `feed.Result.Items` preserves source order and duplicate keys; the reader must preserve that
+  ordering so storage can enforce the approved first-occurrence winner.
+- The fetcher already merges validators on 304; a 200 without validators intentionally clears old
+  tokens. Persist the resulting tokens exactly, atomically with the successful refresh outcome.
+- Keep publisher publication time separate from immutable first-fetch time; derive timeline order
+  using the approved transition table. First-fetch time is not a commit/arrival watermark.
+- Config owns active URLs, names, and tags. Cached feed metadata must not become a subscription list;
+  the future reader should adapt fetched data into store-owned inputs and attach config labels.
+- Existing config comments and the source-of-truth decision overstate deletion as lossless; reading
+  position is explicitly non-regenerable elsewhere. Reconcile that wording when settling seen state.
+
+**Acceptance cases for the next persistence increment (not yet implemented):**
+
+- Repeated keys in one response retain exactly the first normalized entry, even when a later one
+  has more content or a newer/present publication date. Reversing source order reverses the winner;
+  no fields are merged. A duplicate identity is inserted only once.
+- A later successful refresh replaces all publisher fields for an existing key, including blank
+  title/URL/content and missing/invalid publication time, while retaining its first-fetch time.
+  Exercise duplicates on both insertion and update.
+- Cover every publication-date transition in `AGENTS.md`, corrections in both directions, and
+  repeated undated refreshes after date removal. Preserve absence as absence, not as fabricated
+  publication time.
+- First-fetch time survives repeat persistence and close/reopen, even if a later submitted refresh
+  carries an earlier fetch timestamp. A rolled-back insertion establishes no first-fetch time;
+  a subsequent successful insertion uses its own refresh timestamp.
+- The same key in two configured subscriptions remains independent. A changed hash-derived key
+  is a new identity, not an update of a similar-looking item.
+- Unchanged responses preserve all item fields and dates. Failures/rollback preserve both items
+  and validators; successful full responses persist the supplied validators, including clearing them.
+
+**Later query/seen-state cases:** late-discovered dated posts sort by publication, not discovery;
+publication corrections can move existing items. A chronological divider must not claim to separate
+all newly discovered posts. Cover timestamp ties when choosing pagination and seen cursors.
 
 **Tests that make storage complete:** fresh database and repeated open; data surviving close/reopen;
 repeat-refresh deduplication; same key in different subscriptions retained separately; undated items
@@ -104,12 +164,10 @@ Resolve a question before the work it affects, not every future question up fron
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| Store boundary and models | Store API/schema | Store-owned persistence models and explicit adapters versus leaking fetched-item types across layers. Preserve the separate-model decision without creating a shared dumping-ground package. |
-| Updates to an existing item | Upsert implementation | Which entry wins when a response repeats a key; whether/how corrected or newly supplied publication dates change ordering. First-fetch fallback must remain stable. |
+| Refresh models and schema | Item persistence | Exact store-owned inputs/results, feed/item tables, timestamp representation, and unchanged-response representation within the agreed atomic operation. Define handling of overlapping same-feed refreshes. The reader owns conversion; no shared dumping-ground package. |
 | Timeline pagination | Timeline query | Offset versus cursor pagination, with a deterministic tie-breaker and behavior when refresh inserts items between pages. |
-| Meaning of seen position | Finalizing time fields and seen-state schema | Publication order versus arrival/new-since semantics, including late/undated items and when the position advances. No per-item unread flags or counts. |
-| Retention and removed subscriptions | Store lifecycle; explicit policy before v0.1 completion | How to bound growth, whether to retain removed feeds' cached posts, and how active config controls visibility. Subscriptions never become DB-owned. |
-| SQLite concurrency policy | Store connection setup | Connection/transaction strategy, busy handling, and journal settings suitable for a future local server alongside the TUI. |
+| Seen-position representation and advancement | Seen-state schema and UI | Chronological semantics are settled. Choose the saved cursor/tie-breaker, when it advances, behavior when publication corrections move items across it, and truthful divider wording. No arrival watermark, per-item unread flags, or unread counts. |
+| Retention and removed subscriptions | Item persistence/querying; explicit policy before v0.1 completion | How to bound growth, whether to retain removed feeds' cached posts, and how active config controls visibility. Subscriptions never become DB-owned. |
 | Refresh policy | Reader orchestration | Launch, manual, and/or periodic refresh; bounded concurrency and polite behavior toward feed servers without blocking cached reading. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 

@@ -25,19 +25,58 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | Area | Decision | Why |
 |---|---|---|
 | **Navigation** | Unified river is *the* view. Feeds and tags are filters over it, not destinations. | Matches the timeline metaphor. AI ranking later becomes an alternate sort of the same river, not a new screen. |
-| **Read state** | Seen-position, not unread counts. A `── N new since <time> ──` divider; no bold/unbold, no badges. | No inbox-zero pressure. Items age out of the top naturally. |
+| **Read state** | Seen-position in publication/fallback chronology, not unread counts or an arrival watermark. A divider marks that position; no bold/unbold, no badges. | No inbox-zero pressure. Late discoveries can fall below the divider; any discovery count must be separate from it. |
 | **Storage** | SQLite via `modernc.org/sqlite` (pure Go, **no cgo**). `database/sql` directly, no ORM. Hand-written migrations as embedded `.sql`. | Buys FTS5 search, `ORDER BY score` for AI ranking, and safe concurrent access when `serve` runs alongside the TUI. Pure-Go driver keeps cross-compiled release binaries trivial. |
+| **Store boundary** | One atomic operation will persist each successful refresh's items and validators, using store-owned inputs. The reader adapts fetched results; config retains subscription intent and labels. | Separate writes let callers advance validators without saving posts. No HTTP/parser types or caller-managed transactions belong in the store API. |
+| **SQLite connections** | WAL, one connection per store, foreign keys enabled, and FULL synchronous durability. Retry busy lock acquisition for at most five seconds, respecting caller cancellation; never replay a partially executed transaction. | Small local operations do not need an in-process pool. WAL permits readers in another process during writes; Go-managed waits avoid a long, non-cancellable SQLite busy timeout. |
+| **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
 | **Source of truth** | **Config is intent; the DB is cache.** Feeds are declared in hand-editable `config.toml`. The DB holds only derived state. | `rm openfeed.db` must lose nothing you care about. Subscriptions stay greppable and version-controllable. |
 | **Item models** | `feed.Item` represents publisher data; persisted/timeline models will be separate and introduced with their owning packages. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
 | **Feed labels** | Resolved config names are authoritative, including the hostname fallback. Fetched titles never rename subscriptions. | No naming-provenance flag or config changes needed for fetching. |
 | **Item identity** | Within the configured feed URL: publisher ID → usable article URL → SHA-256 of title, feed content, and publication date when present. | Prefer stable identifiers; hashing is a best-effort fallback whose key can change after edits. Different subscriptions retain separate entries. |
+| **Duplicate keys** | Within one response, the first normalized occurrence of a key wins as a whole item. Storage owns this rule; the reader preserves source order. | First and last position are both imperfect freshness signals. Respect source order rather than infer freshness from dates or merge contradictory entries. |
+| **Publisher updates** | For an existing identity, a successfully persisted refresh replaces title, URL, content, and publication date with the winning entry, including empty/missing values. First-fetch time remains immutable. | Keeping selected historical fields invents a composite item and can conceal publisher corrections or removals. The cache reflects the accepted response, not an editorial history. |
 | **Empty feed entries** | Skip entries with no title, feed content/description, or usable article URL after normalization. | An identifier or timestamp alone gives the reader nothing to display or open; partially populated entries remain usable. |
-| **Undated items** | Fetching preserves missing/invalid publication dates; storage will use the first fetch time for timeline ordering. Atom update dates are not publication dates. | Never hash fetch time or move an undated post forward on each refresh. |
+| **Undated items** | Fetching preserves missing/invalid publication dates; storage keeps them absent and uses immutable first-fetch time as the ordering fallback. Atom update dates are not publication dates. | Never hash fetch time, fabricate a publication date, or move a persistently undated post forward on each refresh. |
+| **Timeline dates** | Order by the current publication date when present, otherwise by first-fetch time. Newly supplied, corrected, or removed publication dates can change an existing item's position. | Freezing the initial position would ignore corrections. Publication chronology and discovery are different facts; late discoveries belong at their publication date. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
 | **Paths** | XDG conventions **on all platforms, including macOS.** Hand-rolled in `internal/config`, ~40 lines, no dependency. | Primary dev machine is darwin, where `adrg/xdg` would resolve to `~/Library/Application Support`. We want `~/.config/openfeed` everywhere. |
+
+### Refresh item semantics
+
+For one stored `(configured feed URL, item key)`, let `F₀` be the `FetchedAt` value from the
+refresh whose insertion first commits successfully. Preserve it across updates and reopen;
+it is not the minimum timestamp across subsequent refreshes. A rolled-back insertion establishes
+no first-fetch state. `feed.Result.FetchedAt` is a UTC request-start timestamp, not a commit time
+or a reliable arrival cursor.
+
+Keep publisher publication time nullable and separate from `F₀`. The effective timeline date is
+derived from those facts, not an independently frozen date:
+
+| Publication-date transition | Effective timeline date |
+|---|---|
+| Missing → missing | `F₀`, never the latest fetch time |
+| Missing → dated | Supplied publication date |
+| Dated → corrected | Corrected publication date, earlier or later |
+| Dated → missing/invalid | `F₀` |
+| Missing after removal → dated again | Newly supplied publication date |
+
+Clearing a date can move an older post forward once to its original first-fetch time; repeatedly
+fetching it undated does not move it again. Do not retain a previous date when the winning entry
+has none, or borrow a date/content field from a losing duplicate. An unchanged response (304)
+does not mutate items or their dates; a failed refresh leaves all cached state untouched.
+
+These are same-identity update rules, not similarity matching. If an edit changes a hash-derived
+key, it produces a distinct identity with its own first-fetch time; different subscriptions also
+remain independent.
+
+A post published a week ago and first fetched today belongs a week back in the river, even below
+a saved seen divider. The divider marks chronological position, not every arrival since a wall-clock
+time. Any count attached to it must describe the chronological segment, not all newly discovered
+items; exact cursor representation and advancement are separate decisions.
 
 ### Paths
 
@@ -199,7 +238,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | `bubbletea` · `bubbles` · `lipgloss` | planned | TUI |
 | `cobra` | planned | CLI |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
-| `modernc.org/sqlite` | planned | pure-Go, no cgo (see §2) |
+| `modernc.org/sqlite` | in use | pure-Go, no cgo (see §2) |
 | `go-shiori/go-readability` | later | article extraction |
 
 ### Tooling

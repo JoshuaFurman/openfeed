@@ -44,3 +44,6 @@ jobs:
 
       - name: test
         run: go test -race ./...
+
+      - name: test without cgo
+        run: CGO_ENABLED=0 go test ./...
