@@ -29,19 +29,21 @@ type Item struct {
 	FeedName string
 }
 
-// Query selects river positions strictly older than Before and no older than Through.
-// Nil boundaries are unrestricted; Limit zero uses 50, otherwise 1–200.
+// Query selects river positions strictly older than Before and no older than Through, or else the posts
+// nearest above After, which cannot combine with the others. Nil boundaries are unrestricted.
 type Query struct {
 	Before  *Position
 	Through *Position
-	Limit   int
+	After   *Position
+	Limit   int // Zero uses 50; otherwise 1–200.
 }
 
-// Page contains current posts in newest-first order.
-// Next continues the same Through boundary; nil means that interval is exhausted for now.
+// Page contains current posts in newest-first order; nil continuations mean exhausted for now.
+// Continue older with Before: Next and the same Through, or newer with After: Newer.
 type Page struct {
 	Items []Item
 	Next  *Position
+	Newer *Position
 }
 
 // Reader serves one river across a fixed set of configured subscriptions.
@@ -94,7 +96,7 @@ func New(feeds []config.Feed, st *store.Store, fetcher Fetcher, log *slog.Logger
 // Calls do not share a snapshot; refreshes and date corrections can move posts between pages.
 func (r *Reader) Timeline(ctx context.Context, query Query) (Page, error) {
 	page, err := r.store.Timeline(ctx, store.TimelineQuery{
-		FeedURLs: r.urls, Before: query.Before, Through: query.Through, Limit: query.Limit,
+		FeedURLs: r.urls, Before: query.Before, Through: query.Through, After: query.After, Limit: query.Limit,
 	})
 	if err != nil {
 		return Page{}, err
@@ -103,7 +105,7 @@ func (r *Reader) Timeline(ctx context.Context, query Query) (Page, error) {
 	for i, item := range page.Items {
 		items[i] = Item{TimelineItem: item, FeedName: r.names[item.FeedURL]}
 	}
-	return Page{Items: items, Next: page.Next}, nil
+	return Page{Items: items, Next: page.Next, Newer: page.Newer}, nil
 }
 
 // SeenPosition returns the saved divider position for a session to display, or nil before any.

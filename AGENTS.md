@@ -27,6 +27,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Navigation** | Unified river is *the* view. Feeds and tags are filters over it, not destinations. | Matches the timeline metaphor. AI ranking later becomes an alternate sort of the same river, not a new screen. |
 | **River interaction** | A refreshable, newest-first chronological timeline with endless scrolling through available cached history. Chronologically newer posts appear at the top; pagination is not a user-facing interaction. | Target the reading feel of Twitter's chronological timeline, without algorithmic ranking or page navigation. |
 | **River refresh experience** | At the head, show newer posts; below it, preserve the current reading position and offer a jump to newer posts. Reconcile refreshed data by stable identity without discarding loaded history or silently skipping the interval between a fresh head page and existing history. | Refresh should not interrupt reading. Prepending one page alone misses intervening posts, late discoveries, and corrections inside the loaded range. |
+| **River launch and direction** | Resume at the saved seen position: the cursor starts on the newest post at or below it, and newer posts are above. Reading moves upward; `g` jumps to the newest as an explicit skip. With no saved position, open at the newest post. There, cached posts are history from before the user joined the river, so the first navigation saves the head. | Keeps "You left off here" literally true and the reading position resumable across restarts. Upward reading makes seen advancement contiguous. Opening at the newest post (Twitter-style) was rejected: its divider marks skipped posts as passed. |
 | **Read state** | Seen-position in publication/fallback chronology, not unread counts or an arrival watermark. A divider marks that position; no bold/unbold, no badges. | No inbox-zero pressure. Late discoveries can fall below the divider; any discovery count must be separate from it. |
 | **Seen position** | One global point in timeline order: effective date plus an `ItemID` tie-breaker, stored as values without a foreign key. Absent until the user first reaches an item. | An item bookmark moves with date corrections, loses its anchor when its feed is removed or pruned, and regresses under last-writer-wins. A timestamp-only point hides same-instant posts from date-only feeds. |
 | **Seen advancement** | Only user navigation in the unfiltered river advances it, by keeping the maximum; it never moves backward. Viewport and selection are never persisted. | Loading or rendering is not reading. A maximum is idempotent and order-independent, so concurrent sessions need no revision or conflict error, unlike refreshes. |
@@ -51,7 +52,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline dates** | Order by the earlier of the current publication date and first-fetch time; undated items use first-fetch time. Newly supplied, corrected, or removed publication dates can change an existing item's position. | Freezing the initial position would ignore corrections. Publication chronology and discovery are different facts; late discoveries belong at their publication date. A post cannot have been published after openfeed first saw it, so a future-dated or clock-skewed date sorts at discovery. Otherwise it would pin the river head and the seen divider until that date passes. |
 | **Timeline pagination** | Live keyset pagination ordered by effective timeline date descending, then stable item ID descending. Cursors capture an observed date/ID pair, not an item's mutable current position; each page reads current committed data. | Inserts above a cursor do not shift the boundary as offsets do. Date corrections can still repeat or skip moved identities across raw page reads; no frozen multi-page snapshot or exactly-once traversal under mutation is promised. |
 | **Timeline visibility** | Queries receive the selected active configured URL set. Empty means an empty river; uncached URLs contribute nothing, and inactive cached subscriptions remain hidden without deletion. A changed selection starts a fresh traversal. | Config remains authoritative without becoming a store dependency. URL order does not affect chronology, and identities from different subscriptions remain separate. |
-| **Timeline query contract** | `Timeline` accepts an exclusive `Before` and inclusive oldest `Through` boundary, both optional, with 50 items by default and an explicit limit of 1–200. A page returns items and an optional older continuation within that interval. | One bounded range query supports head reads, endless older scrolling, and reloading an existing span for refresh reconciliation; latest/older-only queries leave range comparison and termination to the reader. |
+| **Timeline query contract** | `Timeline` accepts an exclusive `Before` and inclusive oldest `Through` boundary, both optional, with 50 items by default and an explicit limit of 1–200. A page returns items and an optional older continuation within that interval. Alternatively, an exclusive `After` bound selects the posts nearest above it, still newest-first, with an optional `Newer` continuation; it cannot combine with `Before` or `Through`. | One bounded range query supports head reads, endless older scrolling, and reloading an existing span for refresh reconciliation; latest/older-only queries leave range comparison and termination to the reader. `After` gives upward scrolling and resume-at-divider launches the same query and page vocabulary, rather than a parallel method with duplicate types. |
 | **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors come from results or `SeenPosition` and are used only with the same database, including across handles/reopen. They compare in timeline order across URL sets; continuing a traversal requires the same URL set. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system. The seen position persists its own columns, never a serialized cursor or page continuation. |
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
@@ -122,6 +123,15 @@ inside the span, rather than just head additions. Clear `Through` to resume olde
 refreshed span. Each call sees committed data in one read, without holding a transaction between calls;
 range reads do not turn a changing river into an exactly-once snapshot or perform UI reconciliation.
 
+An `After` read returns the `Limit` positions nearest above its exclusive bound, newest-first. `Newer` is
+the newest returned position and exists only when a newer row exists at query time; `Next` is always
+nil. Continue upward with `After: Newer`. To resume at a saved position, read `After: saved` first, then
+`Before:` the oldest post of that page. When nothing is newer, use an unbounded head page instead. The
+second page then starts with the post at or below the saved position, even after that post moved or
+was removed. If that page is empty, nothing is at or below the saved position (for example, older feeds
+were removed from config), and the cursor starts on the oldest post of the first page. The two reads
+do not share a snapshot, so a concurrent refresh can move a post between them.
+
 ### Seen position
 
 The saved seen position is one global point in timeline order: a canonical effective date and an
@@ -176,6 +186,27 @@ context ends, and `Refresh` returns an error only then. If the starting call is 
 whose context is still live runs a fresh round rather than accepting canceled results. Each joining
 call receives its own copy of the report. Rounds hold no database transaction while fetching, and
 cancellation never leaves a partial save.
+
+### TUI river
+
+The river is a custom windowed list rendered with Lip Gloss, not `bubbles/list`, which is page-oriented
+and adds a filter UI. The loaded window is one contiguous span. Pages of 50 load as the cursor nears
+either edge: older pages by `Before`, newer pages by `After`. Pages join by `ItemID`: a post already in
+the window is never added twice, and one that moved past a page boundary between reads appears at the
+next reload. The cursor follows its post by `ItemID` across reloads. The divider stays at the session's launch baseline and reads
+"── You left off here ──". Rows show `EffectiveDate` age, the config feed name, and the title. Every
+string passes the terminal sanitizer, and columns are sized by display width.
+
+Moving up past the newest post, when nothing newer exists, refreshes; so does launch, while the cached
+river shows. A spinner shows for at least 600ms, and the status line names failing feeds but never
+counts posts. After a refresh, a window that includes the head is reloaded from the head through its
+oldest post, so new posts land above the cursor. Otherwise, new posts wait above the window, and
+changes inside it are reconciled at the next head reload.
+
+Every navigation reaches both the post left and the post landed on, and `g` and `o` reach their post.
+Launch placement and refreshes never do. `SaveSeen` runs after 2s idle, after each refresh, and at
+exit. Keys: `j`/`k` move, `g` jumps to the newest, `o` opens the article URL through the platform opener
+without a shell, and `q` or Ctrl-C quits.
 
 ### Paths
 
@@ -335,7 +366,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | Package | Status | Why this one |
 |---|---|---|
 | `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
-| `bubbletea` · `bubbles` · `lipgloss` | planned | TUI |
+| `charm.land/bubbletea/v2` · `bubbles/v2` · `lipgloss/v2` | approved | TUI event loop, spinner, and layout with display-width-aware styling. v2 is the current stable line (2.0.10 / 2.2.1 / 2.0.6 at approval). `bubbles/list` is deliberately unused. |
 | `cobra` | planned | CLI |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
 | `modernc.org/sqlite` | in use | pure-Go, no cgo (see §2) |

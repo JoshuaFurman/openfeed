@@ -200,8 +200,28 @@ func TestTimelineLabelsAndSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	refresh(t, r)
-	if got := titles(river(t, r)); !slices.Equal(got, []string{"a-new@alpha", "b-mid@beta", "a-old@alpha"}) {
+	all := river(t, r)
+	if got := titles(all); !slices.Equal(got, []string{"a-new@alpha", "b-mid@beta", "a-old@alpha"}) {
 		t.Errorf("river = %v, want configured feeds only, labeled", got)
+	}
+	var upward []Item
+	query := Query{After: &all[2].Position, Limit: 1}
+	for pages := 0; ; pages++ {
+		page, err := r.Timeline(t.Context(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Next != nil || pages > len(all) {
+			t.Fatalf("upward read returned an older continuation or did not end: %+v", page)
+		}
+		upward = append(slices.Clone(page.Items), upward...)
+		if page.Newer == nil {
+			break
+		}
+		query.After = page.Newer
+	}
+	if got := titles(upward); !slices.Equal(got, []string{"a-new@alpha", "b-mid@beta"}) {
+		t.Errorf("upward pages = %v, want labeled posts above the oldest", got)
 	}
 
 	empty := New(nil, st, fetchFunc(func(context.Context, string, feed.Validators) (feed.Result, error) {

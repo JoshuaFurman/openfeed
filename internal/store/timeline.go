@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -49,20 +50,22 @@ func (i TimelineItem) EffectiveDate() time.Time {
 	return i.PublishedAt
 }
 
-// TimelineQuery selects positions strictly older than Before and no older than Through.
-// Nil boundaries are unrestricted; an empty FeedURLs set selects nothing.
+// TimelineQuery selects positions strictly older than Before and no older than Through, or else the
+// positions nearest above After. Nil boundaries are unrestricted; an empty FeedURLs set selects nothing.
 type TimelineQuery struct {
 	FeedURLs []string        // Active configured URLs; order and repetitions do not affect selection.
 	Before   *TimelineCursor // Exclusive older-page boundary.
 	Through  *TimelineCursor // Inclusive oldest boundary.
+	After    *TimelineCursor // Selects the positions nearest above it; cannot combine with Before or Through.
 	Limit    int             // Zero uses 50; otherwise 1–200.
 }
 
-// TimelinePage contains current items in newest-first order.
-// Next continues the same URL set and Through boundary; nil means that interval is exhausted for now.
+// TimelinePage contains current items in newest-first order; nil continuations mean exhausted for now.
+// Continue older with Before: Next and the same URL set and Through, or newer with After: Newer.
 type TimelinePage struct {
 	Items []TimelineItem
 	Next  *TimelineCursor
+	Newer *TimelineCursor
 }
 
 // Timeline reads one current page ordered by the earlier of publication and first-fetch time, then ID,
@@ -81,10 +84,13 @@ func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePa
 	for _, bound := range []struct {
 		name   string
 		cursor *TimelineCursor
-	}{{"before", query.Before}, {"through", query.Through}} {
+	}{{"before", query.Before}, {"through", query.Through}, {"after", query.After}} {
 		if bound.cursor != nil && (bound.cursor.date == "" || bound.cursor.id <= 0) {
 			return TimelinePage{}, fmt.Errorf("%s cursor was not obtained from Timeline or SeenPosition", bound.name)
 		}
+	}
+	if query.After != nil && (query.Before != nil || query.Through != nil) {
+		return TimelinePage{}, errors.New("after cannot be combined with before or through")
 	}
 	if len(query.FeedURLs) == 0 {
 		return TimelinePage{}, nil
@@ -98,10 +104,10 @@ func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePa
 	defer rows.Close()
 
 	var page TimelinePage
+	more := false
 	for rows.Next() {
 		if len(page.Items) == query.Limit {
-			position := page.Items[len(page.Items)-1].Position
-			page.Next = &position
+			more = true
 			break
 		}
 		item, err := scanTimelineItem(rows)
@@ -115,6 +121,16 @@ func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePa
 	}
 	if err := rows.Close(); err != nil {
 		return TimelinePage{}, err
+	}
+	if query.After != nil {
+		slices.Reverse(page.Items) // After reads scan upward from the bound.
+		if more {
+			newest := page.Items[0].Position
+			page.Newer = &newest
+		}
+	} else if more {
+		oldest := page.Items[len(page.Items)-1].Position
+		page.Next = &oldest
 	}
 	return page, nil
 }
@@ -145,7 +161,16 @@ func timelineSQL(query TimelineQuery) (string, []any) {
 		`
 		args = append(args, query.Through.date, query.Through.date, query.Through.id)
 	}
-	statement += `ORDER BY ` + effectiveDate + ` DESC, id DESC LIMIT ?`
+	order := "DESC"
+	if query.After != nil {
+		statement += `
+			AND ` + effectiveDate + ` >= ?
+			AND (` + effectiveDate + `, id) > (?, ?)
+		`
+		args = append(args, query.After.date, query.After.date, query.After.id)
+		order = "ASC"
+	}
+	statement += `ORDER BY ` + effectiveDate + ` ` + order + `, id ` + order + ` LIMIT ?`
 	args = append(args, query.Limit+1)
 	return statement, args
 }

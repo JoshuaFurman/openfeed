@@ -385,7 +385,7 @@ func TestTimelineQueryPlans(t *testing.T) {
 			if len(items) != 64 {
 				t.Fatalf("sparse selection returned %d items", len(items))
 			}
-			for _, bounds := range []string{"head", "before", "through", "both"} {
+			for _, bounds := range []string{"head", "before", "through", "both", "after"} {
 				t.Run(bounds, func(t *testing.T) {
 					query := TimelineQuery{FeedURLs: []string{active}, Limit: 7}
 					start, end := 0, len(items)
@@ -395,7 +395,12 @@ func TestTimelineQueryPlans(t *testing.T) {
 					if bounds == "through" || bounds == "both" {
 						query.Through, end = &items[40].Position, 41
 					}
-					if got := collectTimeline(t, s, query); !slices.Equal(got, items[start:end]) {
+					if bounds == "after" {
+						query.After = &items[40].Position
+						if got := collectNewer(t, s, query); !slices.Equal(got, items[:40]) {
+							t.Error("indexed upward query returned incorrect range")
+						}
+					} else if got := collectTimeline(t, s, query); !slices.Equal(got, items[start:end]) {
 						t.Error("indexed query returned incorrect range")
 					}
 					statement, args := timelineSQL(query)

@@ -8,50 +8,53 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 - **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
   persistence, chronological-range timeline queries across selected active subscriptions, the
-  saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), and reader
-  orchestration (`bf4e163`). Settled decisions and contracts are in `AGENTS.md`.
+  saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), reader
+  orchestration (`bf4e163`), and command wiring with a temporary plain-text river (`56309c5`).
+  Settled decisions and contracts are in `AGENTS.md`.
 - **Current behavior:** `openfeed` loads config, refreshes every subscription through the reader, logs
   failures to `LogPath`, and prints the 20 newest posts as plain text. This printout is temporary,
   until the TUI exists. With no subscriptions it prints where to add one. Ctrl-C exits with status
   130. Schema version 5 orders the timeline by the earlier of publication and first-fetch time.
-- **Last review (command wiring, before commit):** 10 findings, all verified against the code.
-  - **Fixed, each with a test that fails without it:**
-    - the exit-status guard always passed (`stop()` cancels the context), so any stray cancellation
-      exited 130 silently. `main` now records which signal arrived, and `exitStatus` is unit-tested;
-    - SIGTERM exits 143;
-    - a failure joined with cancellation, such as a store close error, is still reported;
-    - errors and paths now pass the sanitizer too;
-    - bidi controls are dropped, and line/paragraph separators become spaces;
-    - dates are shown at `store.TimelineItem.EffectiveDate`, so future-dated posts read in river order.
-  - **Also fixed:** the log is kept at 0600 even if it pre-existed, and the stale reader line in this
-    plan.
-  - **Deferred:** display-width-aware columns (CJK or emoji names misalign; the TUI's layout library
-    handles this) and log rotation (below).
+- **Last review (TUI increment 1, before commit):** 7 findings, all verified; no SQL or crash bugs.
+  - **Contract gaps fixed in `AGENTS.md`:**
+    - when nothing is at or below the saved position, the cursor starts on the oldest post of the
+      `After` page (new resume test case);
+    - pages join by `ItemID`, because the two resume reads don't share a snapshot.
+  - **Also fixed:**
+    - page doc comments that dropped or misstated the continuation rules;
+    - the reader's upward test, which could hang (now capped and checking `Next`) and aliased the
+      returned slice;
+    - inconsistent "older/newer bound" wording.
+  - **Kept, with rationale:** `After` as a separate mode (the user approved option i); and first
+    launch saving the head on the first move. Cached posts before the first launch are history, not a
+    backlog, and `AGENTS.md` now says so.
 
-  Earlier: the reader was reviewed before `bf4e163`, `b5384a3` after its commit, and `0c1d8a3` never
-  separately. Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** the user commits command wiring (step 2). Then design the TUI by comparing two
-  approaches. Start with the launch-placement open question and how pull-to-refresh, the spinner,
-  the seen divider, and position-preserving reconciliation fit together.
-- **Implementation in progress:** command wiring (step 2) is implemented, reviewed, fixed, and verified,
-  but not yet committed. The reader increment is committed in `bf4e163`.
+  Earlier: command wiring was reviewed before `56309c5`, the reader before `bf4e163`, `b5384a3` after
+  its commit, and `0c1d8a3` never separately. Item-ID reuse after deleting the highest-ID row remains a
+  hard retention requirement.
+- **Next action:** the user commits TUI increment 1 (the `After` read). Then build increment 2:
+  river rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout.
+- **Implementation in progress:** TUI increment 1 is implemented, reviewed, fixed, and verified, but
+  not yet committed. It covers:
+  - `store.TimelineQuery.After` with `TimelinePage.Newer`, passed through `reader.Query`/`reader.Page`;
+  - the TUI design and `After` contract recorded in `AGENTS.md` (TUI river, river launch and
+    direction, timeline query contract and reads, Charm v2 dependencies).
 
-- **Last verification:** formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`,
-  `go mod verify`, and `git diff --check` passed. Command tests run `run` offline with temporary XDG
-  directories. After the review fixes, every gate passed again, including `staticcheck`'s check
-  that test sources hold no literal format characters. Undoing each fix made a test fail.
+- **Last verification (increment 1):** formatting, uncached full race and no-cgo tests, `go vet`,
+  `staticcheck`, `go mod verify`, and `git diff --check` passed. Store coverage is 94.4% and reader
+  100%. Store timeline/seen and reader tests passed 25 race-detector runs. Query plans show the `After`
+  read seeking the timeline index without a sort, in tie-heavy and sparse fixtures.
 
-  Smoke runs of the built binary, with temporary XDG directories, used the real network:
-  - Go blog, lobste.rs, and a nonexistent host refreshed in 0.65s. Posts were printed newest first
-    with feed names; the dead host was one failing feed with a readable DNS error, logged at 0600.
-  - An immediate rerun reported both good feeds as already fresh and still printed cached posts.
-  - During a hanging fetch, SIGINT exited within 1s with status 130 and SIGTERM with 143, both with
-    no error output.
+  Deliberately breaking each rule made a test fail:
+  - pages left oldest-first;
+  - `Newer` pointing at the oldest post;
+  - combinations accepted;
+  - selecting the newest rather than the nearest posts;
+  - an inclusive bound;
+  - dropping the scalar seek bound.
 
-  The binary cross-builds for Linux/amd64 and Windows/amd64. Command coverage is 77%; the rest is
-  `main` itself, which the SIGINT smoke run exercised, and setup-error returns. Earlier: reader
-  coverage 100%, 25 reader race runs, and reader and store tests cross-compiling for the same targets.
-  Runtime verification was on macOS/arm64.
+  Store tests cross-compile for Linux/amd64 and Windows/amd64; runtime verification was on
+  macOS/arm64. Command wiring (`56309c5`) was verified with offline tests and real-network smoke runs.
 
 ### Keeping this useful
 
@@ -124,6 +127,12 @@ advance, keeps a session's displayed divider, or renders "You left off here".
   independence after moved/deleted boundary rows and reopen, repeats/skips from date corrections,
   a 125-post head refresh with interior discoveries/corrections, resuming older history afterward,
   and exhaustion that does not hide a later discovery. Boundary deletion is test-only, not a new API.
+- `internal/store/timeline_after_test.go`: `After` reads.
+  - Upward paging over ties, undated posts, and an inactive feed, for several starts and limits.
+  - Edges: above the newest, exactly filled, nearest first, above a tie, and an empty selection.
+  - Rejected combinations and zero cursors.
+  - The resume sequence, with the left-off post in place, newest, moved newer, or removed, and with
+    nothing at or below the saved position.
 - `internal/store/timeline_sql_test.go`: version-2 upgrade without data changes, version-4 upgrade that
   rebuilds the index to match the query expression and reorders a future-dated post without touching
   data or the seen point, cursor reuse across
@@ -188,8 +197,7 @@ or AI. Do not introduce their packages or schema speculatively.
 
 ### Then: `internal/reader` and command wiring
 
-- [x] Construct and inject configuration, store, and HTTP dependencies in the command (step 2;
-  reviewed, commit pending).
+- [x] Construct and inject configuration, store, and HTTP dependencies in the command (`56309c5`).
 - [x] Orchestrate subscription selection, fetching, and persistence behind a reader-shaped API.
 - [x] Handle one feed's failure independently while keeping cached items available.
 - [x] Implement the chosen refresh policy and expose results without HTTP/SQL details to the UI.
@@ -259,6 +267,38 @@ TUI requirements already settled:
 
 The temporary printout in `cmd/openfeed` goes away when the TUI lands.
 
+**TUI design (approved: B, resume where you left off; recorded in
+[`AGENTS.md`](AGENTS.md#tui-river)):**
+
+- Launch placement: resume at the saved position, with newer posts above, reading upward. Pressing up
+  past the newest post refreshes, and `g` jumps to the newest. This needs a store/reader "newer than"
+  read (increment 1). Opening at the newest (Twitter-style) was rejected, because its divider marks
+  skipped posts as passed.
+- Shared: a custom windowed list rendered with Lip Gloss, not `bubbles/list`, which is page-oriented
+  and adds a filter UI. The window loads 50-post pages as the cursor nears either edge, and the cursor
+  follows its post by `ItemID` across reloads. The divider is fixed at the session's launch baseline.
+- Refresh: at launch, and on pull (k at the newest post), with a spinner shown for at least 600ms.
+  When the window includes the head, it is reloaded from the head through its oldest post, and new
+  posts land above the cursor. Otherwise new posts wait above the loaded window, and changes inside
+  it are reconciled at the next head reload. The status line names failing feeds, with no post counts.
+- Seen: `Reached` on every navigation (the post left and the post landed on), on `g`, and on `o`.
+  `SaveSeen` runs after a 2s idle debounce, after each refresh, and at exit.
+- `o` opens the article URL with the platform opener, without a shell. `q` or Ctrl-C quits.
+- Dependencies: `charm.land/bubbletea/v2` v2.0.10, `charm.land/bubbles/v2` v2.2.1 (spinner), and
+  `charm.land/lipgloss/v2` v2.0.6 (layout and display width).
+- Increments:
+  1. The newer-than read (implemented and reviewed; commit pending).
+  2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout.
+  3. Launch and pull refresh with reconciliation.
+  4. Seen: divider, resume placement, and saves.
+
+**Increment 1 (approved; contract in [`AGENTS.md`](AGENTS.md#timeline-reads)):** add `After` to
+`TimelineQuery` and `reader.Query`. It selects the posts nearest above it (strictly newer, nearest
+first), returned newest-first, with a `Newer` continuation. `After` cannot combine with `Before` or `Through`. Launch
+reads `After: saved` first, then `Before:` that page's oldest post, or a head page when nothing is newer.
+This order never needs a "from the bottom" bound. Rejected: a separate `Newer` method with duplicate
+query/page types.
+
 ### v0.1 acceptance
 
 ```text
@@ -278,7 +318,6 @@ Resolve a question before the work it affects, not every future question up fron
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| Launch placement and newer-than reads | TUI | Selection-driven advancement is contiguous when the river opens at the seen point and reading moves upward; that needs an ascending "newer than" read or a head-to-divider span load. |
 | Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. `items.id` lacks `AUTOINCREMENT`, so deleting the highest-ID row lets SQLite reuse that ID (verified). Before any deletion, rebuild `items` with `AUTOINCREMENT` or never delete that row; the seen tie-breaker and first-fetch lookup rely on IDs never being reused. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 
