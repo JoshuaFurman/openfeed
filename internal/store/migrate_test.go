@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -9,6 +10,26 @@ import (
 	"testing"
 	"testing/fstest"
 )
+
+// openMigrationStore isolates migration tests from the evolving domain schema.
+func openMigrationStore(t *testing.T, path string) *Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := migrate(t.Context(), db, migrationFiles(t)); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
 func migrationFiles(t *testing.T, scripts ...string) fstest.MapFS {
 	t.Helper()
@@ -24,7 +45,7 @@ func migrationFiles(t *testing.T, scripts ...string) fstest.MapFS {
 }
 
 func TestMigrateUpgrade(t *testing.T) {
-	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+	s := openMigrationStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 	files := migrationFiles(t,
 		"CREATE TABLE probe (value INTEGER); INSERT INTO probe VALUES (42)",
 		"ALTER TABLE probe ADD COLUMN label TEXT NOT NULL DEFAULT 'retained'",
@@ -45,7 +66,7 @@ func TestMigrateUpgrade(t *testing.T) {
 func TestMigrateRollback(t *testing.T) {
 	for _, failure := range []string{"SQL", "version record", "canceled", "read file"} {
 		t.Run(failure, func(t *testing.T) {
-			s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+			s := openMigrationStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 			execSQL(t, s.db, "CREATE TABLE existing (value INTEGER); INSERT INTO existing VALUES (7)")
 			files := migrationFiles(t,
 				"UPDATE existing SET value = 8; CREATE TABLE probe (value INTEGER)",
@@ -98,7 +119,7 @@ func (f cancelOnRead) ReadFile(name string) ([]byte, error) {
 }
 
 func TestMigrateFirstRunRollback(t *testing.T) {
-	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+	s := openMigrationStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 	execSQL(t, s.db, "DROP TABLE schema_migrations")
 	if err := migrate(t.Context(), s.db, migrationFiles(t, "INVALID SQL")); err == nil {
 		t.Fatal("broken migration succeeded")
@@ -114,7 +135,7 @@ func TestMigrateFirstRunRollback(t *testing.T) {
 func TestMigrateRejectsInvalidSequence(t *testing.T) {
 	for _, failure := range []string{"no files", "file numbering gap", "history gap"} {
 		t.Run(failure, func(t *testing.T) {
-			s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+			s := openMigrationStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 			files := migrationFiles(t, "CREATE TABLE probe (value INTEGER)")
 			want := "consecutively"
 			switch failure {

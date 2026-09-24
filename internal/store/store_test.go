@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,14 +46,21 @@ func queryInt(t *testing.T, db *sql.DB, query string) int {
 	return value
 }
 
+func schemaVersion(t *testing.T) int {
+	t.Helper()
+	names, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(names)
+}
+
 func TestOpenReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "data", "openfeed.db")
 	s := openStore(t, path)
-	if got := queryInt(t, s.db, "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table'"); got != 1 {
-		t.Errorf("created %d tables, want migration bookkeeping only", got)
-	}
-	if got := queryInt(t, s.db, "SELECT version FROM schema_migrations"); got != 1 {
-		t.Errorf("schema version = %d, want 1", got)
+	version := schemaVersion(t)
+	if got := queryInt(t, s.db, "SELECT MAX(version) FROM schema_migrations"); got != version {
+		t.Errorf("schema version = %d, want %d", got, version)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(filepath.Dir(path))
@@ -79,7 +87,7 @@ func TestOpenReopen(t *testing.T) {
 	if err := again.db.QueryRowContext(t.Context(), "SELECT value FROM probe").Scan(&value); err != nil {
 		t.Fatal(err)
 	}
-	if value != "survives reopen" || queryInt(t, again.db, "SELECT COUNT(*) FROM schema_migrations") != 1 {
+	if value != "survives reopen" || queryInt(t, again.db, "SELECT COUNT(*) FROM schema_migrations") != version {
 		t.Error("reopen changed stored data or reapplied a migration")
 	}
 }
@@ -200,7 +208,7 @@ func TestOpenFailures(t *testing.T) {
 func TestOpenRejectsNewerSchemaWithoutChanges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openfeed.db")
 	s := openStore(t, path)
-	execSQL(t, s.db, "INSERT INTO schema_migrations VALUES (2); PRAGMA journal_mode = DELETE")
+	execSQL(t, s.db, "INSERT INTO schema_migrations SELECT MAX(version) + 1 FROM schema_migrations; PRAGMA journal_mode = DELETE")
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -256,9 +264,10 @@ func TestConcurrentOpen(t *testing.T) {
 		})
 		stores = append(stores, r.store)
 	}
+	version := schemaVersion(t)
 	for _, s := range stores {
-		if got := queryInt(t, s.db, "SELECT COUNT(*) FROM schema_migrations"); got != 1 {
-			t.Errorf("migration applied %d times, want 1", got)
+		if got := queryInt(t, s.db, "SELECT COUNT(*) FROM schema_migrations"); got != version {
+			t.Errorf("recorded %d migrations, want %d", got, version)
 		}
 	}
 }

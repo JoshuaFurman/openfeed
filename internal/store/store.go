@@ -35,16 +35,7 @@ type Store struct {
 // Open creates missing parent directories and brings the database up to the supported schema.
 // The path is a filesystem path, not a SQLite URI; a newer schema is rejected without downgrading it.
 func Open(ctx context.Context, path string) (_ *Store, err error) {
-	defer func() {
-		if err != nil {
-			// Keep driver errors private while preserving caller cancellation.
-			cause := ctx.Err()
-			if cause == nil {
-				cause = errors.New(err.Error())
-			}
-			err = fmt.Errorf("open store %q: %w", path, cause)
-		}
-	}()
+	defer func() { err = publicError(ctx, fmt.Sprintf("open store %q", path), err) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -104,6 +95,29 @@ func (s *Store) Close() error {
 		return fmt.Errorf("close store: %s", err)
 	}
 	return nil
+}
+
+func publicError(ctx context.Context, operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	cause := err
+	if ctx.Err() != nil {
+		cause = ctx.Err()
+	} else if !errors.Is(err, ErrRefreshConflict) {
+		cause = errors.New(err.Error()) // Keep driver errors private, preserving domain errors and cancellation.
+	}
+	return fmt.Errorf("%s: %w", operation, cause)
+}
+
+func beginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	var tx *sql.Tx
+	err := retryBusy(ctx, func() error {
+		var err error
+		tx, err = db.BeginTx(ctx, nil)
+		return err
+	})
+	return tx, err
 }
 
 // retryBusy is only for lock acquisition, never for replaying transaction contents.

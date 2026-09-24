@@ -23,12 +23,8 @@ func migrate(ctx context.Context, db *sql.DB, files fs.FS) error {
 		}
 	}
 
-	var tx *sql.Tx
-	if err := retryBusy(ctx, func() error {
-		var err error
-		tx, err = db.BeginTx(ctx, nil)
-		return err
-	}); err != nil {
+	tx, err := beginWrite(ctx, db)
+	if err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	defer tx.Rollback()
