@@ -10,22 +10,27 @@ work status and sequencing. Proposals here are not settled decisions until recor
   persistence, and chronological-range timeline queries across selected active subscriptions.
   Settled decisions and the timeline contract are in `AGENTS.md`.
 - **Current behavior:** `openfeed` still bootstraps/loads config and prints paths and subscriptions.
-  Fetching, persistence, and timeline queries are tested libraries, not wired into the command.
-  Schema version 3 adds the timeline index; seen state, reader orchestration, and TUI do not exist yet.
-- **Review completed:** reviewed all timeline changes against the approved contract for correctness,
+  Fetching, persistence, timeline queries, and the seen position are tested libraries, not wired into
+  the command. Schema version 4 adds the seen position; reader orchestration and TUI do not exist yet.
+- **Last review (timeline):** reviewed all timeline changes against the approved contract for correctness,
   API/design, reliability/tests, performance, and security; no blocking findings. Cursor scope remains
   a caller constraint, and tied/inactive index scans and live date-correction effects remain documented
   trade-offs. This review changed only the handoff; verification below is from implementation.
-- **Next action:** commit the reviewed timeline increment, then design persisted seen-position
-  representation and advancement, including ties and publication-date corrections. Do not implicitly
-  persist the in-memory pagination cursor as the seen-state format; reader/command wiring is separate.
-- **Implementation in progress:** none. Timeline queries and their design records are implemented,
-  verified, and uncommitted; no known blockers. Atomic refresh persistence is committed in `f91a737`.
+- **Next action:** review the seen-position increment against the approved
+  [seen position](AGENTS.md#seen-position) contract, then commit it. After that, design reader
+  orchestration, starting with the refresh-policy open question; the TUI stays separate.
+- **Implementation in progress:** the seen-position increment is implemented and verified, but not yet
+  reviewed or committed. It covers migration `004_seen.sql`, `SeenPosition`/`AdvanceSeen`,
+  `TimelineCursor.Compare`, acceptance tests, and the deletion-wording fixes in `AGENTS.md`,
+  `README.md`, and `internal/config`. The design was approved this session. The timeline increment is
+  committed in `03c426e`.
 - **Last verification:** formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`,
-  `go mod verify`, and `git diff --check` passed. Store coverage is 93.4% in the no-cgo run.
-  Timeline insertion/correction, range refresh, cursor reopen/upgrade, cancellation, WAL, and concurrent
-  query tests passed 25 race-detector runs. Store tests cross-compile without cgo for Linux/amd64 and
-  Windows/amd64 (compile checks only; runtime verification was on macOS/arm64).
+  `go mod verify`, and `git diff --check` passed. Store coverage is 93.8% in the no-cgo run; only the
+  commit-failure branch of `AdvanceSeen` is uncovered. Seen and `Compare` tests passed 25
+  race-detector runs. Deliberately breaking each rule made a test fail: removing the first-fetch cap,
+  last-writer-wins saving, date-only comparison, a reversed tie-breaker, and a foreign key to items.
+  Store tests cross-compile without cgo for Linux/amd64 and Windows/amd64 (compile checks only;
+  runtime verification was on macOS/arm64).
 
 ### Keeping this useful
 
@@ -70,16 +75,18 @@ Complete these as reviewed increments, not one large change:
 - [x] **Query the river.** Added store-owned timeline models, live date/ID cursors, exclusive/inclusive
   range bounds, 50/200 page limits, and migration `003_timeline.sql`. Queries select active URLs without
   changing cached data and support head-span reloads plus continued older-history loading.
-- [ ] **Persist reading position.** Save/load the agreed seen-position representation across runs.
+- [x] **Persist reading position.** Added migration `004_seen.sql`, a singleton seen point saved by
+  keeping the maximum, a first-fetch cap, and `TimelineCursor.Compare` for placing the divider. The
+  point survives reopen, sessions, corrections, and removal of its item. Review is pending.
 
 **Timeline implementation:** [`internal/store/timeline.go`](internal/store/timeline.go) implements the
 approved [timeline read contract](AGENTS.md#timeline-reads). Actual SQLite query plans confirm ordered
 index scans for head reads and date seeks for bounded reads, without a global sort, in tie-heavy and
 sparse-active fixtures. No reader reconciliation, viewport behavior, or refresh scheduling is wired yet.
 
-**Next design comparison:** choose the saved chronological seen-position representation and when it
-advances. Pagination has an opaque observed position, but its existence does not settle divider ties,
-advancement, or the persisted seen-state format.
+**Seen implementation:** [`internal/store/seen.go`](internal/store/seen.go) implements the approved
+[seen position](AGENTS.md#seen-position) contract. It is store-only: nothing yet decides when to
+advance, keeps a session's displayed divider, or renders "You left off here".
 
 **Timeline acceptance coverage:**
 
@@ -96,6 +103,22 @@ advancement, or the persisted seen-state format.
   connection waits, WAL reads during writes, concurrent page consistency, 40,000-URL selections,
   and query plans for each boundary combination in tied/sparse fixtures.
 
+**Seen acceptance coverage:**
+
+- `internal/store/seen_test.go`:
+  - Fresh and v3-upgraded databases start with no position, and reading creates no row; the upgrade
+    leaves the cache unchanged. A saved position survives reopen and is visible from separate handles.
+  - The divider split matches the `Before`/`Through` bounds.
+  - Older, equal, and lower-ID tied positions do not change the saved point. In a date-only feed, a
+    later post at the same instant lands above a divider placed inside a tie.
+  - Late discoveries, a new subscription's back catalog, and date corrections land on the correct
+    side, including corrections to the reached post itself.
+  - The first-fetch cap applies to future-dated posts. The point outlives its hidden or removed item.
+  - Invalid or uncached positions and public errors are rejected. Reads succeed during writes (WAL),
+    and lock waits are bounded and cancellable.
+  - Four handles advancing in shuffled order, interleaved with refreshes, end at the maximum.
+- `internal/store/timeline_test.go`: `Compare` agrees with timeline order across ties and URL sets.
+
 **Reader integration notes:**
 
 - `feed.Result.Items` preserves source order and duplicate keys; the reader must preserve that
@@ -110,8 +133,9 @@ advancement, or the persisted seen-state format.
   automatically adjacent to old history. Preserve a fetchable path across unfinished refresh spans,
   and handle selected items moving outside them. Nil `Next` exhausts the requested interval for now,
   not all history; exact staging and viewport mechanics belong to reader/TUI work.
-- Existing config comments and the source-of-truth decision overstate deletion as lossless; reading
-  position is explicitly non-regenerable elsewhere. Reconcile that wording when settling seen state.
+- Seen state: follow [`AGENTS.md` seen position](AGENTS.md#seen-position) for what advances it,
+  the session's displayed divider, and when to save. `AdvanceSeen` failures are logged and never
+  block reading.
 
 **Persistence acceptance coverage:**
 
@@ -127,13 +151,8 @@ advancement, or the persisted seen-state format.
 - Lifecycle tests now follow the embedded migration count; migration-engine tests start from an
   isolated bookkeeping-only schema so future domain migrations do not change their fixtures.
 
-**Seen-state cases:** late-discovered dated posts sort by publication, not discovery; corrections
-can move existing items across a divider. The divider must not claim to separate all newly discovered
-posts. Cover timestamp ties when choosing its representation and advancement rules.
-
-**Remaining storage verification:** saved reading position surviving reopen and its agreed boundary/
-advancement behavior. Public errors and results must not expose SQL types. Apply the quality gates in
-`AGENTS.md` to each increment.
+**Remaining storage work:** review and commit the seen-position increment. Retention remains an open
+question below. Apply the quality gates in `AGENTS.md` to each increment.
 
 **Still deferred:** launch refresh, scheduling, rendering, full-text extraction, search, web serving,
 or AI. Do not introduce their packages or schema speculatively.
@@ -179,8 +198,9 @@ Resolve a question before the work it affects, not every future question up fron
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| Seen-position representation and advancement | Seen-state schema and UI | Chronological semantics are settled. Choose the saved cursor/tie-breaker, when it advances, behavior when publication corrections move items across it, and truthful divider wording. No arrival watermark, per-item unread flags, or unread counts. |
-| Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. |
+| Launch placement and newer-than reads | TUI | Selection-driven advancement is contiguous when the river opens at the seen point and reading moves upward; that needs an ascending "newer than" read or a head-to-divider span load. |
+| Future-dated publication dates | TUI | Under the current timeline semantics, a post dated in the future stays pinned at the river head. The seen position's first-fetch cap stops such posts from breaking the divider; whether the timeline order itself should cap them is separate. |
+| Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. Pruning must keep item IDs increasing, because the seen tie-breaker relies on it. |
 | Refresh policy | Reader orchestration | Launch, manual, and/or periodic refresh; bounded concurrency and polite behavior toward feed servers without blocking cached reading. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 

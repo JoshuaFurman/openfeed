@@ -187,6 +187,38 @@ func TestTimelinePaginationWithTies(t *testing.T) {
 	}
 }
 
+func TestTimelineCursorCompare(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+	const a, b = "https://a.example/feed", "https://b.example/feed"
+	at := sampleRefresh().FetchedAt
+	for _, url := range []string{a, b} {
+		var entries []RefreshItem
+		for i := range 30 {
+			published := at.Add(time.Duration(i%3) * time.Nanosecond)
+			if i%4 == 0 {
+				published = time.Time{}
+			}
+			entries = append(entries, timelineEntry(fmt.Sprintf("%s-%d", url, i), published))
+		}
+		saveRefresh(t, s, url, Refresh{Items: entries, FetchedAt: at})
+	}
+	all := collectTimeline(t, s, TimelineQuery{FeedURLs: []string{a, b}, Limit: 7})
+	for i, item := range all {
+		if item.Position.Compare(item.Position) != 0 {
+			t.Fatalf("position %d does not equal itself", i)
+		}
+		if i > 0 && (all[i-1].Position.Compare(item.Position) <= 0 || item.Position.Compare(all[i-1].Position) >= 0) {
+			t.Fatalf("Compare disagrees with timeline order at %d", i)
+		}
+	}
+	// Positions from different URL sets order as the combined river does.
+	merged := slices.Concat(collectTimeline(t, s, TimelineQuery{FeedURLs: []string{a}}), collectTimeline(t, s, TimelineQuery{FeedURLs: []string{b}}))
+	slices.SortFunc(merged, func(x, y TimelineItem) int { return y.Position.Compare(x.Position) })
+	if got, want := timelineTitles(merged), timelineTitles(all); !slices.Equal(got, want) {
+		t.Errorf("cross-selection order = %v, want %v", got, want)
+	}
+}
+
 func TestTimelineLimitsAndExhaustion(t *testing.T) {
 	for _, count := range []int{0, 1, 49, 50, 51, 200, 201} {
 		t.Run(fmt.Sprintf("%d items", count), func(t *testing.T) {

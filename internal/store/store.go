@@ -1,5 +1,5 @@
-// Package store persists openfeed's cached reader state independently of fetching and presentation.
-// Subscription intent and labels remain config-owned.
+// Package store persists cached feeds and the saved reading position independently of fetching and
+// presentation. Subscription intent and labels remain config-owned.
 package store
 
 import (
@@ -26,7 +26,7 @@ const (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// Store owns cached reader state at one database path.
+// Store owns cached feeds and the saved reading position at one database path.
 // Construct it with Open; a Store is safe for concurrent use.
 type Store struct {
 	db *sql.DB

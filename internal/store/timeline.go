@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,10 +14,17 @@ import (
 type ItemID int64
 
 // TimelineCursor is an opaque observed chronological position, not a live reference to an item.
-// Obtain it from a Timeline result and reuse it only with the same database and URL set.
+// Obtain it from Timeline or SeenPosition and use it only with the same database; continuing a traversal
+// also requires the same URL set.
 type TimelineCursor struct {
 	date string
 	id   ItemID
+}
+
+// Compare orders positions chronologically, breaking date ties by ItemID as the timeline does.
+// It returns a negative value when c is older than other and zero when they are equal.
+func (c TimelineCursor) Compare(other TimelineCursor) int {
+	return cmp.Or(cmp.Compare(c.date, other.date), cmp.Compare(c.id, other.id))
 }
 
 // TimelineItem is cached publisher data with a stable identity and its position when queried.

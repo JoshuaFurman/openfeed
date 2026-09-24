@@ -6,7 +6,7 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Configuration loading, feed fetching, and atomic refresh persistence work as libraries; timeline queries and the UI do not exist yet.
+> Configuration loading, feed fetching, refresh persistence, timeline queries, and the saved reading position work as libraries; the UI does not exist yet.
 > The CLI still only prints resolved configuration. [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
@@ -21,8 +21,8 @@ terminal, with no backlog guilt.
   Items age out of the top on their own.
 - **Your sources, in a text file.** Subscriptions live in a hand-editable `config.toml` you can
   grep, diff, and commit. Nothing is algorithmic unless you ask for it.
-- **The database is a cache.** `rm openfeed.db` loses cached posts and your reading position —
-  never a subscription.
+- **Subscriptions never live in the database.** `rm openfeed.db` loses cached posts and your
+  reading position — never a subscription.
 
 Later, the same core gets a web face (`openfeed serve`, localhost, htmx) and optional AI
 (daily digest, article summaries). openfeed is designed to be fully usable with AI turned off.
@@ -74,7 +74,7 @@ openfeed follows XDG conventions **on every platform, including macOS** — you 
 | Path | Contents |
 |---|---|
 | `$XDG_CONFIG_HOME/openfeed/config.toml` | **Intent.** Your subscriptions. Hand-edited, git-able. |
-| `$XDG_DATA_HOME/openfeed/openfeed.db` | **Derived.** Cached posts, extracted text, reading position. |
+| `$XDG_DATA_HOME/openfeed/openfeed.db` | **Local state.** Cached posts, extracted text, reading position. |
 | `$XDG_STATE_HOME/openfeed/openfeed.log` | Logs. |
 
 Defaults when those variables are unset: `~/.config`, `~/.local/share`, `~/.local/state`.

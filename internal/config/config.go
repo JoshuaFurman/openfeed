@@ -1,8 +1,8 @@
 // Package config loads openfeed's settings and locates the files it reads and
 // writes.
 //
-// config.toml is the source of truth for intent. Everything in the database is
-// derived from it and may be deleted without loss.
+// config.toml is the source of truth for subscriptions. The database never owns
+// one; deleting it discards cached posts and the saved reading position.
 package config
 
 import (
@@ -37,8 +37,9 @@ type Config struct {
 // a fresh install launches to an empty timeline instead of an error.
 const starterConfig = `# openfeed configuration
 #
-# This file is the source of truth for what you read. openfeed's database is
-# derived from it and can be deleted at any time without losing anything.
+# This file is the source of truth for what you read. Deleting openfeed's
+# database never unsubscribes you, but it does discard cached posts and your
+# saved reading position.
 #
 # Subscribe by adding a [[feed]] block pointing at any RSS or Atom URL.
 # "name" and "tags" are optional.
@@ -89,8 +90,8 @@ func Load() (*Config, error) {
 // FilePath reports where config.toml lives, whether or not it exists yet.
 func (c *Config) FilePath() string { return filepath.Join(c.paths.config, "config.toml") }
 
-// DatabasePath reports where derived state is stored. Deleting that file
-// discards cached posts and reading position, but no subscriptions.
+// DatabasePath reports where cached posts and the saved reading position are
+// stored. Deleting that file loses both, but no subscriptions.
 func (c *Config) DatabasePath() string { return filepath.Join(c.paths.data, "openfeed.db") }
 
 // LogPath reports where openfeed writes its log.

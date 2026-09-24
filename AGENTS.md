@@ -28,6 +28,8 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **River interaction** | A refreshable, newest-first chronological timeline with endless scrolling through available cached history. Chronologically newer posts appear at the top; pagination is not a user-facing interaction. | Target the reading feel of Twitter's chronological timeline, without algorithmic ranking or page navigation. |
 | **River refresh experience** | At the head, show newer posts; below it, preserve the current reading position and offer a jump to newer posts. Reconcile refreshed data by stable identity without discarding loaded history or silently skipping the interval between a fresh head page and existing history. | Refresh should not interrupt reading. Prepending one page alone misses intervening posts, late discoveries, and corrections inside the loaded range. |
 | **Read state** | Seen-position in publication/fallback chronology, not unread counts or an arrival watermark. A divider marks that position; no bold/unbold, no badges. | No inbox-zero pressure. Late discoveries can fall below the divider; any discovery count must be separate from it. |
+| **Seen position** | One global point in timeline order: effective date plus an `ItemID` tie-breaker, capped at the reached item's first-fetch time and stored as values without a foreign key. Absent until the user first reaches an item. | An item bookmark moves with date corrections, loses its anchor when its feed is removed or pruned, and regresses under last-writer-wins. A timestamp-only point hides same-instant posts from date-only feeds. The cap stops one future-dated post from pinning the divider ahead of real time. |
+| **Seen advancement** | Only user navigation in the unfiltered river advances it, by keeping the maximum; it never moves backward. Viewport and selection are never persisted. | Loading or rendering is not reading. A maximum is idempotent and order-independent, so concurrent sessions need no revision or conflict error, unlike refreshes. |
 | **Storage** | SQLite via `modernc.org/sqlite` (pure Go, **no cgo**). `database/sql` directly, no ORM. Hand-written migrations as embedded `.sql`. | Buys FTS5 search, `ORDER BY score` for AI ranking, and safe concurrent access when `serve` runs alongside the TUI. Pure-Go driver keeps cross-compiled release binaries trivial. |
 | **Store boundary** | `FeedState` reads a subscription's cached validators and an opaque revision; `SaveRefresh` atomically persists a successful outcome against that snapshot, using store-owned inputs. The reader adapts fetched results; config retains subscription intent and labels. | Separate writes let callers advance validators without saving posts. No HTTP/parser types or caller-managed transactions belong in the store API. |
 | **Overlapping refreshes** | Only the first refresh committed against a given feed revision succeeds. Every accepted outcome advances the revision; a stale snapshot returns `ErrRefreshConflict` without changes. | Last-commit-wins lets a slow response overwrite newer content/validators. Revisions work across processes without holding a database lock during HTTP; fetch timestamps are not version tokens. |
@@ -37,7 +39,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Refresh retention** | Refreshes never delete omitted items or prune cached feeds. Config remains authoritative for which subscriptions are active. | Feed responses are often sliding windows, not deletion lists. A bounded retention/removal policy belongs to its own reviewed increment. |
 | **SQLite connections** | WAL, one connection per store, foreign keys enabled, and FULL synchronous durability. Retry busy lock acquisition for at most five seconds, respecting caller cancellation; never replay a partially executed transaction. | Small local operations do not need an in-process pool. WAL permits readers in another process during writes; Go-managed waits avoid a long, non-cancellable SQLite busy timeout. |
 | **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
-| **Source of truth** | **Config is intent; the DB is cache.** Feeds are declared in hand-editable `config.toml`. The DB holds only derived state. | `rm openfeed.db` must lose nothing you care about. Subscriptions stay greppable and version-controllable. |
+| **Source of truth** | **Config is intent; the DB is local state.** Feeds are declared in hand-editable `config.toml`. The DB holds feed caches, derived data, and the saved reading position; it never owns a subscription. | Deleting `openfeed.db` never loses a subscription. It does lose the reading position, which is not regenerable, and cached posts that have left their feeds' windows. Subscriptions stay greppable and version-controllable. |
 | **Item models** | `feed.Item` represents publisher data; `store.RefreshItem` and `store.TimelineItem` are separate store-owned input and read models. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
 | **Feed labels** | Resolved config names are authoritative, including the hostname fallback. Fetched titles never rename subscriptions. | No naming-provenance flag or config changes needed for fetching. |
 | **Item identity** | Within the configured feed URL: publisher ID → usable article URL → SHA-256 of title, feed content, and publication date when present. | Prefer stable identifiers; hashing is a best-effort fallback whose key can change after edits. Different subscriptions retain separate entries. |
@@ -49,7 +51,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline pagination** | Live keyset pagination ordered by effective timeline date descending, then stable item ID descending. Cursors capture an observed date/ID pair, not an item's mutable current position; each page reads current committed data. | Inserts above a cursor do not shift the boundary as offsets do. Date corrections can still repeat or skip moved identities across raw page reads; no frozen multi-page snapshot or exactly-once traversal under mutation is promised. |
 | **Timeline visibility** | Queries receive the selected active configured URL set. Empty means an empty river; uncached URLs contribute nothing, and inactive cached subscriptions remain hidden without deletion. A changed selection starts a fresh traversal. | Config remains authoritative without becoming a store dependency. URL order does not affect chronology, and identities from different subscriptions remain separate. |
 | **Timeline query contract** | `Timeline` accepts an exclusive `Before` and inclusive oldest `Through` boundary, both optional, with 50 items by default and an explicit limit of 1–200. A page returns items and an optional older continuation within that interval. | One bounded range query supports head reads, endless older scrolling, and reloading an existing span for refresh reconciliation; latest/older-only queries leave range comparison and termination to the reader. |
-| **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors must come from results and be reused only with the same database and URL set, including across handles/reopen. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system or a serialized seen-position format. |
+| **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors come from results or `SeenPosition` and are used only with the same database, including across handles/reopen. They compare in timeline order across URL sets; continuing a traversal requires the same URL set. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system. The seen position persists its own columns, never a serialized cursor or page continuation. |
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
@@ -94,8 +96,7 @@ remain independent.
 
 A post published a week ago and first fetched today belongs a week back in the river, even below
 a saved seen divider. The divider marks chronological position, not every arrival since a wall-clock
-time. Any count attached to it must describe the chronological segment, not all newly discovered
-items; exact cursor representation and advancement are separate decisions.
+time, and carries no count; see [Seen position](#seen-position).
 
 ### Timeline reads
 
@@ -116,11 +117,43 @@ inside the span, rather than just head additions. Clear `Through` to resume olde
 refreshed span. Each call sees committed data in one read, without holding a transaction between calls;
 range reads do not turn a changing river into an exactly-once snapshot or perform UI reconciliation.
 
+### Seen position
+
+The saved seen position is one global point in timeline order: a canonical effective date and an
+`ItemID` tie-breaker, stored as values in a singleton row. It is not a reference to the item it came
+from, a page continuation, or the viewport. Items move across the fixed point; the point never follows
+an item, and it survives that item's correction, hiding, or removal.
+
+`AdvanceSeen` receives the observed position of an item the user reached and keeps the maximum.
+Its date is capped at that item's immutable first-fetch time. Normal posts are published before they are
+fetched, so the cap only affects future-dated or clock-skewed posts. Older, equal, and lower-ID tied
+positions are no-ops. Among exact timestamp ties, later discoveries receive larger IDs and sort above the
+point; retention must keep IDs increasing to preserve this.
+
+| After the point P | Placement |
+|---|---|
+| New post dated after P, or a later discovery at exactly P's date | Above |
+| Late discovery dated before P, including a new subscription's back catalog | Below |
+| Post corrected to a newer or older date | Moves across accordingly |
+| The reached post's own date corrected or removed | Point stays; the post moves |
+
+Only user navigation in the unfiltered river advances the position: selecting a post or explicitly
+jumping to the newest. Launch placement, refresh, page loads, rendering, corrections, subscription
+changes, and scrolling older never do; later filtered views display the point without advancing it.
+A session reads the point once as its displayed divider and advances the saved point separately.
+The reader saves only when its reached maximum grows, debounced and on refresh/exit; a failed save is
+logged and never blocks reading.
+
+There is no position or divider before the first advance, including on a fresh, upgraded, or deleted
+database; none is fabricated at launch. Subscription changes never alter it. Sessions and processes
+merge through the maximum in one write, so interleaving cannot regress it. The divider reads
+"You left off here": no count, and never "new", "unread", "since your last visit", or "caught up".
+
 ### Paths
 
 ```
 $XDG_CONFIG_HOME/openfeed/config.toml    # intent — yours, hand-edited, git-able
-$XDG_DATA_HOME/openfeed/openfeed.db      # derived — items, extracted text, seen position, summaries
+$XDG_DATA_HOME/openfeed/openfeed.db      # local state — cached items, extracted text, summaries, seen position
 $XDG_STATE_HOME/openfeed/openfeed.log    # logs
 ```
 
@@ -163,7 +196,7 @@ The most consequential interface in openfeed is the seam between *what the reade
 Timeline(ctx, Query) ([]Item, error)
 Refresh(ctx) (RefreshResult, error)
 Article(ctx, ItemID) (Article, error)
-MarkSeen(ctx, time.Time) error
+MarkSeen(ctx, Position) error
 ```
 
 Four methods hiding conditional GET, ETag handling, GUID dedup, chronological merge, pagination, readability extraction, and caching. Both the TUI and the web server consume exactly this and nothing more.
