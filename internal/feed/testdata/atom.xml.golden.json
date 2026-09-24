@@ -1,0 +1,23 @@
+[
+  {
+    "Key": "id:urn:post:1",
+    "Title": "Atom entry",
+    "URL": "https://example.com/blog/posts/1",
+    "Content": "<p>Atom content.</p>",
+    "PublishedAt": "2025-09-02T13:00:00Z"
+  },
+  {
+    "Key": "id:urn:post:2",
+    "Title": "Updated is not published",
+    "URL": "",
+    "Content": "Summary only.",
+    "PublishedAt": "0001-01-01T00:00:00Z"
+  },
+  {
+    "Key": "sha256:6ffbd95284d003f44cd1ec6c7c21215ac4f5aec77f08148dbd6ecba7f68079b9",
+    "Title": "Invalid publication date",
+    "URL": "",
+    "Content": "No identifier or link.",
+    "PublishedAt": "0001-01-01T00:00:00Z"
+  }
+]

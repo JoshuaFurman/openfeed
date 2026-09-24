@@ -28,6 +28,12 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Read state** | Seen-position, not unread counts. A `── N new since <time> ──` divider; no bold/unbold, no badges. | No inbox-zero pressure. Items age out of the top naturally. |
 | **Storage** | SQLite via `modernc.org/sqlite` (pure Go, **no cgo**). `database/sql` directly, no ORM. Hand-written migrations as embedded `.sql`. | Buys FTS5 search, `ORDER BY score` for AI ranking, and safe concurrent access when `serve` runs alongside the TUI. Pure-Go driver keeps cross-compiled release binaries trivial. |
 | **Source of truth** | **Config is intent; the DB is cache.** Feeds are declared in hand-editable `config.toml`. The DB holds only derived state. | `rm openfeed.db` must lose nothing you care about. Subscriptions stay greppable and version-controllable. |
+| **Item models** | `feed.Item` represents publisher data; persisted/timeline models will be separate and introduced with their owning packages. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
+| **Feed labels** | Resolved config names are authoritative, including the hostname fallback. Fetched titles never rename subscriptions. | No naming-provenance flag or config changes needed for fetching. |
+| **Item identity** | Within the configured feed URL: publisher ID → usable article URL → SHA-256 of title, feed content, and publication date when present. | Prefer stable identifiers; hashing is a best-effort fallback whose key can change after edits. Different subscriptions retain separate entries. |
+| **Empty feed entries** | Skip entries with no title, feed content/description, or usable article URL after normalization. | An identifier or timestamp alone gives the reader nothing to display or open; partially populated entries remain usable. |
+| **Undated items** | Fetching preserves missing/invalid publication dates; storage will use the first fetch time for timeline ordering. Atom update dates are not publication dates. | Never hash fetch time or move an undated post forward on each refresh. |
+| **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
@@ -171,7 +177,7 @@ Subject to revision — this is a sketch, not a contract.
 ```
 cmd/openfeed/         thin main: construct deps, hand off to cli      ✅ scaffold
 internal/config/      XDG paths, config.toml load/validate            ✅ done
-internal/feed/        fetch + parse + normalize (gofeed), conditional GET
+internal/feed/        fetch + parse + normalize (gofeed), conditional GET ✅ done
 internal/store/       SQLite; domain-shaped API; embedded migrations
 internal/reader/      orchestration — the core seam (see §3)
 internal/tui/         Bubble Tea
@@ -192,7 +198,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
 | `bubbletea` · `bubbles` · `lipgloss` | planned | TUI |
 | `cobra` | planned | CLI |
-| `mmcdole/gofeed` | planned | RSS/Atom/JSON Feed parsing |
+| `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
 | `modernc.org/sqlite` | planned | pure-Go, no cgo (see §2) |
 | `go-shiori/go-readability` | later | article extraction |
 
@@ -211,7 +217,7 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 ### v0.1 — read-only river *(current)*
 
 - [x] `internal/config` — XDG paths, cold-start bootstrap, validation
-- [ ] `internal/feed` — fetch + parse into normalized items
+- [x] `internal/feed` — fetch + parse into normalized items, conditional GET, per-feed identity keys
 - [ ] `internal/store` — schema, migrations, upsert, timeline query
 - [ ] `internal/reader` — the core seam
 - [ ] `internal/tui` — river rendering, `j`/`k`, `o`, seen divider
@@ -240,7 +246,7 @@ Reader pane with on-demand extraction · feed management commands & OPML import/
 
 - Small, coherent changes. One design decision at a time.
 - Discuss design before implementing anything non-trivial. Propose two approaches (§ Design it twice) and recommend one.
-- When a design decision has multiple valid answers — error-handling strategy, data structure choice, key business logic — **hand it to the human.** Leave a single `TODO(human)` in the code with surrounding context built out, and explain the trade-offs. This project is partly a learning exercise; that is a feature, not overhead.
+- Explain meaningful trade-offs and implement the agreed behavior completely, including tests. Do not leave implementation exercises or decision placeholders for the user.
 - Explain *why*, not just *what*. Insights about the codebase and the reasoning behind choices are part of the deliverable.
 
 ### Commits
@@ -262,8 +268,6 @@ separate commits.
 
 ## 7. Open questions
 
-- **Naming provenance** — `config.Load` derives `Feed.Name` from the host when the user gives none, and afterwards nothing can distinguish "the user typed `theverge.com`" from "we derived it." When `internal/feed` fetches the feed's own `<title>`, it will need to know whether overwriting is allowed. Options: keep the raw config value alongside the derived one, carry a `nameIsDerived` flag, or defer derivation to the render layer so the config value stays untouched. Decide before `feed` writes anything back.
-- **`Item` ownership** — `Item` is produced by `feed`, persisted by `store`, served by `reader`, rendered by `tui` and `server`. A shared `types` package would be an anemic, shallow module; having everyone import `feed` puts a fetching package in the web server's dependency graph. Needs a design-it-twice before `feed` is written.
 - **TOML round-tripping** — `openfeed add` must eventually rewrite `config.toml` without destroying the user's comments and formatting. No Go library does this cleanly. Deferred: v0.1's config is read-only.
 - **Retention** — how long do items stay in the DB? Unbounded growth is not a plan.
 - **Refresh policy** — on launch? background ticker? manual only? Interacts with being a good citizen toward feed servers.

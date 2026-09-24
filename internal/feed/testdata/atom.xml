@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://EXAMPLE.com/blog/">
+  <title>Atom fixture</title>
+  <id>urn:feed:example</id>
+  <updated>2025-09-03T15:00:00Z</updated>
+  <entry xml:base="posts/">
+    <id>urn:post:1</id>
+    <title>Atom entry</title>
+    <link href="1"/>
+    <published>2025-09-02T09:00:00-04:00</published>
+    <updated>2025-09-03T15:00:00Z</updated>
+    <summary>Short summary</summary>
+    <content type="html">&lt;p&gt;Atom content.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>urn:post:2</id>
+    <title>Updated is not published</title>
+    <updated>2025-09-03T15:00:00Z</updated>
+    <summary>Summary only.</summary>
+  </entry>
+  <entry>
+    <title>Invalid publication date</title>
+    <published>not a date</published>
+    <updated>2025-09-03T15:00:00Z</updated>
+    <summary>No identifier or link.</summary>
+  </entry>
+</feed>

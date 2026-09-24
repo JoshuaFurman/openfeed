@@ -6,8 +6,8 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Configuration loading works. Fetching, storage, and the timeline UI do not exist yet.
-> [`CLAUDE.md`](CLAUDE.md) tracks what is left for v0.1.
+> Configuration loading and the feed-fetching module work; storage and the timeline UI do not exist yet.
+> The CLI still only prints resolved configuration. [`AGENTS.md`](AGENTS.md) tracks what is left for v0.1.
 
 ## Why
 
@@ -86,7 +86,7 @@ and system cleaners purge `CACHE`.
 Contributions are welcome, but this is a small, opinionated codebase and design discussion comes
 before code. Open an issue describing the problem before sending a PR for anything non-trivial.
 
-[`CLAUDE.md`](CLAUDE.md) is the design record: the decisions already settled, the reasoning behind
+[`AGENTS.md`](AGENTS.md) is the design record: the decisions already settled, the reasoning behind
 them, the roadmap, and the questions still open. Read it before proposing anything structural.
 
 Before submitting:
@@ -107,7 +107,8 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/) and stay short:
 `feat(store): ...`, `fix(feed): ...`, `docs: ...`. Unrelated changes get separate commits.
-Tests never hit the network; parser tests use recorded fixtures.
+Tests never hit the network; parser tests use checked-in fixtures and golden results, and HTTP tests
+use an in-memory transport.
 
 ## License
 

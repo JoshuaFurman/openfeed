@@ -1,0 +1,23 @@
+[
+  {
+    "Key": "id:post-1",
+    "Title": "A & B",
+    "URL": "https://www.example.com/Posts/1?source=rss#section",
+    "Content": "<p>Full & rich.</p>",
+    "PublishedAt": "2025-09-02T13:00:00Z"
+  },
+  {
+    "Key": "url:https://example.com/posts/2",
+    "Title": "Link only",
+    "URL": "https://example.com/posts/2",
+    "Content": "<p>Summary only.</p>",
+    "PublishedAt": "0001-01-01T00:00:00Z"
+  },
+  {
+    "Key": "sha256:7296bd8e80f663b676160d4159fade3afc619d4dce80a5e1b533dfcd0c11654d",
+    "Title": "Undated",
+    "URL": "",
+    "Content": "Text without an identifier.",
+    "PublishedAt": "0001-01-01T00:00:00Z"
+  }
+]
