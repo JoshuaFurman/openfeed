@@ -172,12 +172,12 @@ Prefer interfaces that are somewhat more general than today's need — usually *
 
 ### Intended layout
 
-Subject to revision — this is a sketch, not a contract.
+Subject to revision — this is a sketch, not a contract. Implementation status lives in [`PLAN.md`](PLAN.md).
 
 ```
-cmd/openfeed/         thin main: construct deps, hand off to cli      ✅ scaffold
-internal/config/      XDG paths, config.toml load/validate            ✅ done
-internal/feed/        fetch + parse + normalize (gofeed), conditional GET ✅ done
+cmd/openfeed/         thin main: construct deps, hand off to cli
+internal/config/      XDG paths, config.toml load/validate
+internal/feed/        fetch + parse + normalize (gofeed), conditional GET
 internal/store/       SQLite; domain-shaped API; embedded migrations
 internal/reader/      orchestration — the core seam (see §3)
 internal/tui/         Bubble Tea
@@ -212,31 +212,11 @@ go install honnef.co/go/tools/cmd/staticcheck@latest
 
 ---
 
-## 5. Roadmap
+## 5. Living plan
 
-### v0.1 — read-only river *(current)*
-
-- [x] `internal/config` — XDG paths, cold-start bootstrap, validation
-- [x] `internal/feed` — fetch + parse into normalized items, conditional GET, per-feed identity keys
-- [ ] `internal/store` — schema, migrations, upsert, timeline query
-- [ ] `internal/reader` — the core seam
-- [ ] `internal/tui` — river rendering, `j`/`k`, `o`, seen divider
-
-Done when:
-
-```
-$ vim ~/.config/openfeed/config.toml     # hand-edit feeds
-$ openfeed
-→ river renders, j/k scrolls
-→ `o` opens the item in a browser
-→ seen-position persists across runs
-```
-
-No `add`/`rm` commands. No reader pane. This exists to prove the whole seam — fetch → store → timeline → render — end to end before more surface area lands.
-
-### Later, roughly in order
-
-Reader pane with on-demand extraction · feed management commands & OPML import/export · search (FTS5) · filters and tags · `openfeed serve` · AI providers behind the seam.
+[`PLAN.md`](PLAN.md) is the authoritative roadmap, task checklist, and cross-session handoff.
+It tracks the v0.1 acceptance criteria, the next reviewed increment, open questions, and later work.
+This file remains the record of settled decisions and engineering conventions; do not duplicate task status here.
 
 ---
 
@@ -244,6 +224,7 @@ Reader pane with on-demand extraction · feed management commands & OPML import/
 
 **Do not one-shot this project.** It is being built deliberately, in reviewed increments.
 
+- Read `PLAN.md` at session start and update it after each reviewed increment and before handoff: completed work, unfinished work/blockers, verification, and the next concrete action.
 - Small, coherent changes. One design decision at a time.
 - Discuss design before implementing anything non-trivial. Propose two approaches (§ Design it twice) and recommend one.
 - Explain meaningful trade-offs and implement the agreed behavior completely, including tests. Do not leave implementation exercises or decision placeholders for the user.
@@ -263,11 +244,11 @@ separate commits.
 3. Interface comments written for every exported symbol.
 4. No new red flags from §3.
 5. This file updated if a decision changed.
+6. `PLAN.md` updated to reflect actual progress, remaining work, and the next action.
 
 ---
 
 ## 7. Open questions
 
-- **TOML round-tripping** — `openfeed add` must eventually rewrite `config.toml` without destroying the user's comments and formatting. No Go library does this cleanly. Deferred: v0.1's config is read-only.
-- **Retention** — how long do items stay in the DB? Unbounded growth is not a plan.
-- **Refresh policy** — on launch? background ticker? manual only? Interacts with being a good citizen toward feed servers.
+Unresolved questions and when they must be decided live in [`PLAN.md`](PLAN.md#open-design-questions).
+When a choice is settled, record the decision and rationale in §2 here and remove the open question from the plan.

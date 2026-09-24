@@ -7,7 +7,7 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 
 > **Status: early. Not yet usable as a reader.**
 > Configuration loading and the feed-fetching module work; storage and the timeline UI do not exist yet.
-> The CLI still only prints resolved configuration. [`AGENTS.md`](AGENTS.md) tracks what is left for v0.1.
+> The CLI still only prints resolved configuration. [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
 
@@ -86,8 +86,9 @@ and system cleaners purge `CACHE`.
 Contributions are welcome, but this is a small, opinionated codebase and design discussion comes
 before code. Open an issue describing the problem before sending a PR for anything non-trivial.
 
-[`AGENTS.md`](AGENTS.md) is the design record: the decisions already settled, the reasoning behind
-them, the roadmap, and the questions still open. Read it before proposing anything structural.
+[`AGENTS.md`](AGENTS.md) records settled design decisions, their reasoning, and engineering conventions.
+[`PLAN.md`](PLAN.md) is the living roadmap: current status, next steps, open questions, and session handoff.
+Read both before proposing anything structural.
 
 Before submitting:
 
