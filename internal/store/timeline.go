@@ -35,7 +35,7 @@ type TimelineItem struct {
 	Title          string
 	URL            string    // Absolute HTTP(S) article URL, or empty.
 	Content        string    // Feed-provided content; may contain untrusted HTML.
-	PublishedAt    time.Time // UTC; zero means absent.
+	PublishedAt    time.Time // UTC publisher date, even when later than FirstFetchedAt; zero means absent.
 	FirstFetchedAt time.Time // UTC; immutable for this identity.
 	Position       TimelineCursor
 }
@@ -56,8 +56,8 @@ type TimelinePage struct {
 	Next  *TimelineCursor
 }
 
-// Timeline reads one current page ordered by publication/fallback date, then ID, both descending.
-// Calls do not share a snapshot; date corrections can move items across page boundaries.
+// Timeline reads one current page ordered by the earlier of publication and first-fetch time, then ID,
+// both descending. Calls do not share a snapshot; date corrections can move items across page boundaries.
 func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePage, err error) {
 	defer func() { err = publicError(ctx, "read timeline", err) }()
 	if err := ctx.Err(); err != nil {
@@ -74,7 +74,7 @@ func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePa
 		cursor *TimelineCursor
 	}{{"before", query.Before}, {"through", query.Through}} {
 		if bound.cursor != nil && (bound.cursor.date == "" || bound.cursor.id <= 0) {
-			return TimelinePage{}, fmt.Errorf("%s cursor was not obtained from Timeline", bound.name)
+			return TimelinePage{}, fmt.Errorf("%s cursor was not obtained from Timeline or SeenPosition", bound.name)
 		}
 	}
 	if len(query.FeedURLs) == 0 {
@@ -110,6 +110,9 @@ func (s *Store) Timeline(ctx context.Context, query TimelineQuery) (_ TimelinePa
 	return page, nil
 }
 
+// effectiveDate must match the items_timeline index expression exactly, or queries stop using it.
+const effectiveDate = "COALESCE(MIN(published_at, first_fetched_at), first_fetched_at)"
+
 func timelineSQL(query TimelineQuery) (string, []any) {
 	feedURLs, _ := json.Marshal(query.FeedURLs) // A slice of strings is always JSON-encodable.
 	statement := `
@@ -121,19 +124,19 @@ func timelineSQL(query TimelineQuery) (string, []any) {
 	// Scalar date bounds enable index seeks; SQLite does not seek with the expression tuple alone.
 	if query.Before != nil {
 		statement += `
-			AND COALESCE(published_at, first_fetched_at) <= ?
-			AND (COALESCE(published_at, first_fetched_at), id) < (?, ?)
+			AND ` + effectiveDate + ` <= ?
+			AND (` + effectiveDate + `, id) < (?, ?)
 		`
 		args = append(args, query.Before.date, query.Before.date, query.Before.id)
 	}
 	if query.Through != nil {
 		statement += `
-			AND COALESCE(published_at, first_fetched_at) >= ?
-			AND (COALESCE(published_at, first_fetched_at), id) >= (?, ?)
+			AND ` + effectiveDate + ` >= ?
+			AND (` + effectiveDate + `, id) >= (?, ?)
 		`
 		args = append(args, query.Through.date, query.Through.date, query.Through.id)
 	}
-	statement += `ORDER BY COALESCE(published_at, first_fetched_at) DESC, id DESC LIMIT ?`
+	statement += `ORDER BY ` + effectiveDate + ` DESC, id DESC LIMIT ?`
 	args = append(args, query.Limit+1)
 	return statement, args
 }
@@ -156,7 +159,8 @@ func scanTimelineItem(rows *sql.Rows) (TimelineItem, error) {
 		if err != nil {
 			return TimelineItem{}, fmt.Errorf("item %d publication time: %w", item.ID, err)
 		}
-		item.Position.date = publishedAt.String
+		// Canonical timestamps compare chronologically as text.
+		item.Position.date = min(publishedAt.String, firstFetchedAt)
 	}
 	return item, nil
 }

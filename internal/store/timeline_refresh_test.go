@@ -13,7 +13,7 @@ func TestTimelineInsertionsBetweenPages(t *testing.T) {
 	s, writer := openStore(t, path), openStore(t, path)
 	const url = "https://example.com/feed"
 	at := sampleRefresh().FetchedAt
-	saveRefresh(t, s, url, Refresh{FetchedAt: at, Items: []RefreshItem{
+	saveRefresh(t, s, url, Refresh{FetchedAt: fixtureFetch(), Items: []RefreshItem{
 		timelineEntry("a", at.Add(4*time.Hour)), timelineEntry("b", at.Add(3*time.Hour)),
 		timelineEntry("c", at.Add(2*time.Hour)), timelineEntry("d", at.Add(time.Hour)),
 	}})
@@ -43,7 +43,7 @@ func TestTimelineObservedBoundary(t *testing.T) {
 			s := openStore(t, path)
 			const url = "https://example.com/feed"
 			at := sampleRefresh().FetchedAt
-			saveRefresh(t, s, url, Refresh{FetchedAt: at.Add(6 * time.Hour), Items: []RefreshItem{
+			saveRefresh(t, s, url, Refresh{FetchedAt: fixtureFetch(), Items: []RefreshItem{
 				timelineEntry("a", at.Add(4*time.Hour)), timelineEntry("b", at.Add(3*time.Hour)),
 				timelineEntry("c", at.Add(2*time.Hour)), timelineEntry("d", at.Add(time.Hour)),
 			}})
@@ -103,7 +103,7 @@ func TestTimelineDateCorrectionsAcrossPages(t *testing.T) {
 			s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 			const url = "https://example.com/feed"
 			at := sampleRefresh().FetchedAt
-			saveRefresh(t, s, url, Refresh{FetchedAt: at, Items: []RefreshItem{
+			saveRefresh(t, s, url, Refresh{FetchedAt: fixtureFetch(), Items: []RefreshItem{
 				timelineEntry("a", at.Add(4*time.Hour)), timelineEntry("b", at.Add(3*time.Hour)),
 				timelineEntry("c", at.Add(2*time.Hour)), timelineEntry("d", at.Add(time.Hour)),
 			}})
@@ -135,7 +135,8 @@ func TestTimelineRefreshLoadedRange(t *testing.T) {
 	for i := range 10 {
 		old = append(old, timelineEntry(fmt.Sprintf("old-%d", i), at.Add(time.Duration(10-i)*time.Minute)))
 	}
-	saveRefresh(t, s, url, Refresh{FetchedAt: at, Items: old})
+	fetched := fixtureFetch()
+	saveRefresh(t, s, url, Refresh{FetchedAt: fetched, Items: old})
 	query := TimelineQuery{FeedURLs: []string{url}, Limit: 3}
 	first := readTimeline(t, s, query)
 	query.Before = first.Next
@@ -153,7 +154,7 @@ func TestTimelineRefreshLoadedRange(t *testing.T) {
 	corrected.Title, corrected.Content = "corrected-old-2", "replacement content"
 	corrected.PublishedAt = at.Add(630 * time.Second)
 	refresh = append(refresh, corrected, timelineEntry("late", at.Add(390*time.Second)))
-	saveRefresh(t, s, url, Refresh{FetchedAt: at.Add(24 * time.Hour), Items: refresh})
+	saveRefresh(t, s, url, Refresh{FetchedAt: fetched.Add(24 * time.Hour), Items: refresh})
 
 	query.Before, query.Through, query.Limit = nil, &floor, 50
 	reloaded := collectTimeline(t, s, query)
@@ -161,7 +162,7 @@ func TestTimelineRefreshLoadedRange(t *testing.T) {
 	if got := timelineTitles(reloaded); !slices.Equal(got, want) {
 		t.Fatalf("refreshed span has a gap or stale ordering: %v, want %v", got, want)
 	}
-	if reloaded[125].ID != originalID || reloaded[125].Content != corrected.Content || reloaded[125].FirstFetchedAt != at {
+	if reloaded[125].ID != originalID || reloaded[125].Content != corrected.Content || reloaded[125].FirstFetchedAt != fetched {
 		t.Error("refresh changed identity or retained stale content")
 	}
 	seen := make(map[ItemID]bool)

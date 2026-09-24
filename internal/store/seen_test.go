@@ -216,7 +216,7 @@ func TestSeenLateDiscoveriesAndCorrections(t *testing.T) {
 	}
 }
 
-func TestSeenFirstFetchCap(t *testing.T) {
+func TestSeenFutureDatedPosts(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 	const url = "https://example.com/feed"
 	query := TimelineQuery{FeedURLs: []string{url}}
@@ -225,25 +225,21 @@ func TestSeenFirstFetchCap(t *testing.T) {
 		timelineEntry("undated", time.Time{}), timelineEntry("future", at.Add(100*time.Hour)),
 		timelineEntry("past", at.Add(-time.Hour)),
 	}})
-	items := itemsByTitle(collectTimeline(t, s, query))
-	for _, name := range []string{"past", "undated"} {
-		advanceSeen(t, s, items[name].Position)
-		if got := seenPosition(t, s); got == nil || *got != items[name].Position {
-			t.Fatalf("cap changed %s position to %+v", name, got)
-		}
+	future := itemsByTitle(collectTimeline(t, s, query))["future"]
+	if want := (TimelineCursor{date: at.Format(timestampLayout), id: future.ID}); future.Position != want {
+		t.Fatalf("future-dated post observed at %+v, want first-fetch position %+v", future.Position, want)
 	}
-	future := items["future"]
 	advanceSeen(t, s, future.Position)
 	seen := seenPosition(t, s)
-	if want := (TimelineCursor{date: at.Format(timestampLayout), id: future.ID}); seen == nil || *seen != want {
-		t.Fatalf("future-dated post saved %+v, want first-fetch cap %+v", seen, want)
+	if seen == nil || *seen != future.Position {
+		t.Fatalf("seen position = %+v, want %+v", seen, future.Position)
 	}
 
 	saveRefresh(t, s, url, Refresh{FetchedAt: at.Add(2 * time.Hour), Items: []RefreshItem{timelineEntry("real", at.Add(time.Hour))}})
-	checkDivider(t, collectTimeline(t, s, query), *seen, []string{"future", "real"}, []string{"undated", "past"})
+	checkDivider(t, collectTimeline(t, s, query), *seen, []string{"real"}, []string{"future", "undated", "past"})
 	query.Before = seen
 	if got := timelineTitles(collectTimeline(t, s, query)); !slices.Equal(got, []string{"undated", "past"}) {
-		t.Errorf("capped position as Before bound = %v", got)
+		t.Errorf("seen position as Before bound = %v", got)
 	}
 }
 
@@ -284,8 +280,9 @@ func TestSeenOutlivesItemAndSubscription(t *testing.T) {
 	if got := timelineTitles(collectTimeline(t, s, query)); !slices.Equal(got, []string{"a-new", "b-new"}) {
 		t.Errorf("orphaned position as Through bound = %v", got)
 	}
-	if err := s.AdvanceSeen(t.Context(), reached.Position); err == nil || !strings.Contains(err.Error(), "not cached") {
-		t.Errorf("advancing to a removed item returned %v", err)
+	advanceSeen(t, s, *seen)
+	if got := seenPosition(t, s); got == nil || *got != reached.Position {
+		t.Errorf("re-saving an orphaned point changed it to %+v", got)
 	}
 }
 
@@ -294,7 +291,7 @@ func TestSeenInvalidPositions(t *testing.T) {
 	const url = "https://example.com/feed"
 	saveRefresh(t, s, url, sampleRefresh())
 	item := readTimeline(t, s, TimelineQuery{FeedURLs: []string{url}}).Items[0]
-	invalid := []TimelineCursor{{}, {date: item.Position.date}, {date: item.Position.date, id: item.ID + 1}}
+	invalid := []TimelineCursor{{}, {date: item.Position.date}, {id: item.ID}}
 	for _, saved := range []bool{false, true} {
 		if saved {
 			advanceSeen(t, s, item.Position)
@@ -311,7 +308,7 @@ func TestSeenInvalidPositions(t *testing.T) {
 }
 
 func TestSeenPublicErrors(t *testing.T) {
-	for _, name := range []string{"canceled", "deadline", "closed", "missing seen table", "missing items table"} {
+	for _, name := range []string{"canceled", "deadline", "closed", "missing seen table"} {
 		t.Run(name, func(t *testing.T) {
 			s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 			const url = "https://example.com/feed"
@@ -336,16 +333,12 @@ func TestSeenPublicErrors(t *testing.T) {
 				}
 			case "missing seen table":
 				execSQL(t, s.db, "DROP TABLE seen_position")
-			case "missing items table":
-				execSQL(t, s.db, "DROP TABLE items")
 			}
 			var driverErr *sqlite.Error
 			position, err := s.SeenPosition(ctx)
-			if name != "missing items table" {
-				if err == nil || position != nil || !strings.Contains(err.Error(), "read seen position") ||
-					errors.As(err, &driverErr) || (wantIs != nil && !errors.Is(err, wantIs)) {
-					t.Errorf("failed read returned %+v, %v", position, err)
-				}
+			if err == nil || position != nil || !strings.Contains(err.Error(), "read seen position") ||
+				errors.As(err, &driverErr) || (wantIs != nil && !errors.Is(err, wantIs)) {
+				t.Errorf("failed read returned %+v, %v", position, err)
 			}
 			err = s.AdvanceSeen(ctx, reached)
 			if err == nil || !strings.Contains(err.Error(), "advance seen position") ||

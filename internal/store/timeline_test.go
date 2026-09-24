@@ -17,6 +17,9 @@ func timelineEntry(name string, published time.Time) RefreshItem {
 	}
 }
 
+// fixtureFetch follows every fixture publication date, so ordering uses those dates rather than the cap.
+func fixtureFetch() time.Time { return sampleRefresh().FetchedAt.Add(1000 * time.Hour) }
+
 func readTimeline(t *testing.T, s *Store, query TimelineQuery) TimelinePage {
 	t.Helper()
 	page, err := s.Timeline(t.Context(), query)
@@ -73,7 +76,7 @@ func TestTimelineVisibility(t *testing.T) {
 		{quoted, []RefreshItem{timelineEntry("quoted", at.Add(time.Hour))}},
 		{empty, nil},
 	} {
-		saveRefresh(t, s, feed.url, Refresh{Items: feed.items, FetchedAt: at})
+		saveRefresh(t, s, feed.url, Refresh{Items: feed.items, FetchedAt: fixtureFetch()})
 	}
 	before := make(map[string]cachedFeed)
 	for _, url := range []string{a, b, inactive, quoted, empty, unknown} {
@@ -138,7 +141,7 @@ func TestTimelinePaginationWithTies(t *testing.T) {
 		url := fmt.Sprintf("https://%d.example/feed", feed)
 		var entries []RefreshItem
 		for i := range 193 {
-			published := at.Add(time.Duration(i%3) * time.Nanosecond)
+			published := at.Add(-time.Duration(i%3) * time.Nanosecond)
 			if i%4 == 0 {
 				published = time.Time{}
 			}
@@ -157,7 +160,7 @@ func TestTimelinePaginationWithTies(t *testing.T) {
 		}
 	}
 	effective := func(item TimelineItem) time.Time {
-		if item.PublishedAt.IsZero() {
+		if item.PublishedAt.IsZero() || item.PublishedAt.After(item.FirstFetchedAt) {
 			return item.FirstFetchedAt
 		}
 		return item.PublishedAt
@@ -194,7 +197,7 @@ func TestTimelineCursorCompare(t *testing.T) {
 	for _, url := range []string{a, b} {
 		var entries []RefreshItem
 		for i := range 30 {
-			published := at.Add(time.Duration(i%3) * time.Nanosecond)
+			published := at.Add(-time.Duration(i%3) * time.Nanosecond)
 			if i%4 == 0 {
 				published = time.Time{}
 			}
@@ -248,7 +251,7 @@ func TestTimelineRangeEdges(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 	const url = "https://example.com/feed"
 	at := sampleRefresh().FetchedAt
-	saveRefresh(t, s, url, Refresh{FetchedAt: at, Items: []RefreshItem{
+	saveRefresh(t, s, url, Refresh{FetchedAt: fixtureFetch(), Items: []RefreshItem{
 		timelineEntry("above", at.Add(time.Nanosecond)),
 		timelineEntry("tie-a", at), timelineEntry("tie-b", at), timelineEntry("tie-c", at),
 		timelineEntry("below", at.Add(-time.Nanosecond)),
@@ -309,6 +312,7 @@ func TestTimelinePublicationTransitions(t *testing.T) {
 		{"removed", time.Time{}, true},
 		{"still absent", time.Time{}, true},
 		{"restored", first.Add(-36 * time.Hour), false},
+		{"dated after first fetch", first.Add(100 * time.Hour), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			entry := timelineEntry("target", tc.published)
@@ -328,6 +332,13 @@ func TestTimelinePublicationTransitions(t *testing.T) {
 			}
 			if item.ID != id || item.FirstFetchedAt != first || item.PublishedAt != tc.published || item.URL != "" || item.Content != "" {
 				t.Errorf("wrong replacement: %+v", item)
+			}
+			effective := first
+			if !tc.published.IsZero() && tc.published.Before(first) {
+				effective = tc.published
+			}
+			if item.Position.date != effective.Format(timestampLayout) {
+				t.Errorf("effective date = %s, want %s", item.Position.date, effective.Format(timestampLayout))
 			}
 			saveRefresh(t, s, url, Refresh{FetchedAt: first.Add(100 * time.Hour), Unchanged: true})
 			if got := collectTimeline(t, s, TimelineQuery{FeedURLs: []string{url}, Limit: 1}); !slices.Equal(got, items) {

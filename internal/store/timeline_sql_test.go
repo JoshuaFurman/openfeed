@@ -63,6 +63,66 @@ func TestTimelineUpgradeAndReopen(t *testing.T) {
 	}
 }
 
+func timelineIndexSQL(t *testing.T, s *Store) string {
+	t.Helper()
+	var statement string
+	if err := s.db.QueryRowContext(t.Context(), "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'items_timeline'").Scan(&statement); err != nil {
+		t.Fatal(err)
+	}
+	return statement
+}
+
+func TestTimelineFirstFetchCapUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openfeed.db")
+	old := openMigrationStore(t, path)
+	var scripts []string
+	for _, name := range []string{"002_refresh.sql", "003_timeline.sql", "004_seen.sql"} {
+		script, err := fs.ReadFile(migrations, "migrations/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scripts = append(scripts, string(script))
+	}
+	if err := migrate(t.Context(), old.db, migrationFiles(t, scripts...)); err != nil {
+		t.Fatal(err)
+	}
+	const early, late = "https://early.example/feed", "https://late.example/feed"
+	at := sampleRefresh().FetchedAt
+	saveRefresh(t, old, early, Refresh{FetchedAt: at, Items: []RefreshItem{
+		timelineEntry("future", at.Add(100*time.Hour)), timelineEntry("recent", at.Add(-time.Hour)),
+	}})
+	saveRefresh(t, old, late, Refresh{FetchedAt: at.Add(10 * time.Hour), Items: []RefreshItem{timelineEntry("later", at.Add(5*time.Hour))}})
+	if strings.Contains(timelineIndexSQL(t, old), "MIN(") {
+		t.Fatal("upgrade fixture already caps timeline dates")
+	}
+	caches := map[string]cachedFeed{early: readCache(t, old, early), late: readCache(t, old, late)}
+	saved := TimelineCursor{date: at.Add(-time.Hour).Format(timestampLayout), id: ItemID(caches[early].Items[1].ID)}
+	execSQL(t, old.db, fmt.Sprintf("INSERT INTO seen_position VALUES (1, '%s', %d)", saved.date, saved.id))
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openStore(t, path)
+	if got := timelineIndexSQL(t, s); !strings.Contains(got, effectiveDate) {
+		t.Fatalf("timeline index does not match the query expression: %s", got)
+	}
+	for url, cache := range caches {
+		if got := readCache(t, s, url); !reflect.DeepEqual(got, cache) {
+			t.Errorf("index rebuild changed cached data for %s", url)
+		}
+	}
+	if got := seenPosition(t, s); got == nil || *got != saved {
+		t.Errorf("index rebuild changed seen position to %+v", got)
+	}
+	items := collectTimeline(t, s, TimelineQuery{FeedURLs: []string{early, late}})
+	if got := timelineTitles(items); !slices.Equal(got, []string{"later", "future", "recent"}) {
+		t.Fatalf("future-dated post is not ordered at first fetch: %v", got)
+	}
+	if items[1].PublishedAt != at.Add(100*time.Hour) || items[1].Position.date != at.Format(timestampLayout) {
+		t.Errorf("cap changed the publisher date or missed the position: %+v", items[1])
+	}
+}
+
 func TestTimelineInvalidQuery(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
 	for _, tc := range []struct {
@@ -318,7 +378,7 @@ func TestTimelineQueryPlans(t *testing.T) {
 					}
 					entries[i] = timelineEntry(fmt.Sprintf("post-%d", i), date)
 				}
-				saveRefresh(t, s, url, Refresh{FetchedAt: at, Items: entries})
+				saveRefresh(t, s, url, Refresh{FetchedAt: fixtureFetch(), Items: entries})
 			}
 			execSQL(t, s.db, "ANALYZE")
 			items := readTimeline(t, s, TimelineQuery{FeedURLs: []string{active}, Limit: 200}).Items

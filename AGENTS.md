@@ -28,7 +28,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **River interaction** | A refreshable, newest-first chronological timeline with endless scrolling through available cached history. Chronologically newer posts appear at the top; pagination is not a user-facing interaction. | Target the reading feel of Twitter's chronological timeline, without algorithmic ranking or page navigation. |
 | **River refresh experience** | At the head, show newer posts; below it, preserve the current reading position and offer a jump to newer posts. Reconcile refreshed data by stable identity without discarding loaded history or silently skipping the interval between a fresh head page and existing history. | Refresh should not interrupt reading. Prepending one page alone misses intervening posts, late discoveries, and corrections inside the loaded range. |
 | **Read state** | Seen-position in publication/fallback chronology, not unread counts or an arrival watermark. A divider marks that position; no bold/unbold, no badges. | No inbox-zero pressure. Late discoveries can fall below the divider; any discovery count must be separate from it. |
-| **Seen position** | One global point in timeline order: effective date plus an `ItemID` tie-breaker, capped at the reached item's first-fetch time and stored as values without a foreign key. Absent until the user first reaches an item. | An item bookmark moves with date corrections, loses its anchor when its feed is removed or pruned, and regresses under last-writer-wins. A timestamp-only point hides same-instant posts from date-only feeds. The cap stops one future-dated post from pinning the divider ahead of real time. |
+| **Seen position** | One global point in timeline order: effective date plus an `ItemID` tie-breaker, stored as values without a foreign key. Absent until the user first reaches an item. | An item bookmark moves with date corrections, loses its anchor when its feed is removed or pruned, and regresses under last-writer-wins. A timestamp-only point hides same-instant posts from date-only feeds. |
 | **Seen advancement** | Only user navigation in the unfiltered river advances it, by keeping the maximum; it never moves backward. Viewport and selection are never persisted. | Loading or rendering is not reading. A maximum is idempotent and order-independent, so concurrent sessions need no revision or conflict error, unlike refreshes. |
 | **Storage** | SQLite via `modernc.org/sqlite` (pure Go, **no cgo**). `database/sql` directly, no ORM. Hand-written migrations as embedded `.sql`. | Buys FTS5 search, `ORDER BY score` for AI ranking, and safe concurrent access when `serve` runs alongside the TUI. Pure-Go driver keeps cross-compiled release binaries trivial. |
 | **Store boundary** | `FeedState` reads a subscription's cached validators and an opaque revision; `SaveRefresh` atomically persists a successful outcome against that snapshot, using store-owned inputs. The reader adapts fetched results; config retains subscription intent and labels. | Separate writes let callers advance validators without saving posts. No HTTP/parser types or caller-managed transactions belong in the store API. |
@@ -47,7 +47,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Publisher updates** | For an existing identity, a successfully persisted refresh replaces title, URL, content, and publication date with the winning entry, including empty/missing values. First-fetch time remains immutable. | Keeping selected historical fields invents a composite item and can conceal publisher corrections or removals. The cache reflects the accepted response, not an editorial history. |
 | **Empty feed entries** | Skip entries with no title, feed content/description, or usable article URL after normalization. | An identifier or timestamp alone gives the reader nothing to display or open; partially populated entries remain usable. |
 | **Undated items** | Fetching preserves missing/invalid publication dates; storage keeps them absent and uses immutable first-fetch time as the ordering fallback. Atom update dates are not publication dates. | Never hash fetch time, fabricate a publication date, or move a persistently undated post forward on each refresh. |
-| **Timeline dates** | Order by the current publication date when present, otherwise by first-fetch time. Newly supplied, corrected, or removed publication dates can change an existing item's position. | Freezing the initial position would ignore corrections. Publication chronology and discovery are different facts; late discoveries belong at their publication date. |
+| **Timeline dates** | Order by the earlier of the current publication date and first-fetch time; undated items use first-fetch time. Newly supplied, corrected, or removed publication dates can change an existing item's position. | Freezing the initial position would ignore corrections. Publication chronology and discovery are different facts; late discoveries belong at their publication date. A post cannot have been published after openfeed first saw it, so a future-dated or clock-skewed date sorts at discovery. Otherwise it would pin the river head and the seen divider until that date passes. |
 | **Timeline pagination** | Live keyset pagination ordered by effective timeline date descending, then stable item ID descending. Cursors capture an observed date/ID pair, not an item's mutable current position; each page reads current committed data. | Inserts above a cursor do not shift the boundary as offsets do. Date corrections can still repeat or skip moved identities across raw page reads; no frozen multi-page snapshot or exactly-once traversal under mutation is promised. |
 | **Timeline visibility** | Queries receive the selected active configured URL set. Empty means an empty river; uncached URLs contribute nothing, and inactive cached subscriptions remain hidden without deletion. A changed selection starts a fresh traversal. | Config remains authoritative without becoming a store dependency. URL order does not affect chronology, and identities from different subscriptions remain separate. |
 | **Timeline query contract** | `Timeline` accepts an exclusive `Before` and inclusive oldest `Through` boundary, both optional, with 50 items by default and an explicit limit of 1–200. A page returns items and an optional older continuation within that interval. | One bounded range query supports head reads, endless older scrolling, and reloading an existing span for refresh reconciliation; latest/older-only queries leave range comparison and termination to the reader. |
@@ -75,7 +75,8 @@ no first-fetch state. `feed.Result.FetchedAt` is a UTC request-start timestamp, 
 or a reliable arrival cursor.
 
 Keep publisher publication time nullable and separate from `F₀`. The effective timeline date is
-derived from those facts, not an independently frozen date:
+derived from those facts, not an independently frozen date. A publication date later than `F₀` counts
+as `F₀`, while the publisher's date stays available for display:
 
 | Publication-date transition | Effective timeline date |
 |---|---|
@@ -84,6 +85,7 @@ derived from those facts, not an independently frozen date:
 | Dated → corrected | Corrected publication date, earlier or later |
 | Dated → missing/invalid | `F₀` |
 | Missing after removal → dated again | Newly supplied publication date |
+| Any date later than `F₀` (future-dated or clock skew) | `F₀` |
 
 Clearing a date can move an older post forward once to its original first-fetch time; repeatedly
 fetching it undated does not move it again. Do not retain a previous date when the winning entry
@@ -125,10 +127,11 @@ from, a page continuation, or the viewport. Items move across the fixed point; t
 an item, and it survives that item's correction, hiding, or removal.
 
 `AdvanceSeen` receives the observed position of an item the user reached and keeps the maximum.
-Its date is capped at that item's immutable first-fetch time. Normal posts are published before they are
-fetched, so the cap only affects future-dated or clock-skewed posts. Older, equal, and lower-ID tied
-positions are no-ops. Among exact timestamp ties, later discoveries receive larger IDs and sort above the
-point; retention must keep IDs increasing to preserve this.
+Timeline dates are already capped at first fetch, so the point never runs ahead of real time. The
+reached post sits exactly at the point, and posts tied with it and older sit directly below it in the
+river. Older, equal, and lower-ID tied positions are no-ops. Among exact timestamp ties, later
+discoveries receive larger IDs and sort above the point; retention must keep IDs increasing to preserve
+this.
 
 | After the point P | Placement |
 |---|---|
@@ -196,7 +199,7 @@ The most consequential interface in openfeed is the seam between *what the reade
 Timeline(ctx, Query) ([]Item, error)
 Refresh(ctx) (RefreshResult, error)
 Article(ctx, ItemID) (Article, error)
-MarkSeen(ctx, Position) error
+AdvanceSeen(ctx, Position) error
 ```
 
 Four methods hiding conditional GET, ETag handling, GUID dedup, chronological merge, pagination, readability extraction, and caching. Both the TUI and the web server consume exactly this and nothing more.
