@@ -123,6 +123,11 @@ func TestLoadRejectsBadConfigs(t *testing.T) {
 			wantErr:  "missing host",
 		},
 		{
+			name:     "port without hostname",
+			contents: "[[feed]]\nurl = \"https://:8080/feed.xml\"\n",
+			wantErr:  "missing host",
+		},
+		{
 			name: "duplicate feed",
 			contents: "[[feed]]\nurl = \"https://example.com/f.xml\"\n" +
 				"[[feed]]\nurl = \"https://example.com/f.xml\"\n",

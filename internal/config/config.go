@@ -126,7 +126,7 @@ func (f *Feed) normalize() error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("url %q: scheme must be http or https", f.URL)
 	}
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		return fmt.Errorf("url %q: missing host", f.URL)
 	}
 	// url.Parse preserves host case; DNS ignores it. Lowering makes duplicate
