@@ -54,6 +54,8 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors come from results or `SeenPosition` and are used only with the same database, including across handles/reopen. They compare in timeline order across URL sets; continuing a traversal requires the same URL set. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system. The seen position persists its own columns, never a serialized cursor or page continuation. |
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
+| **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds with config names, `Refresh`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
+| **Refresh policy** | Refresh at launch, while the cached river shows, and on pull (moving up past the newest post). Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
@@ -144,13 +146,35 @@ Only user navigation in the unfiltered river advances the position: selecting a 
 jumping to the newest. Launch placement, refresh, page loads, rendering, corrections, subscription
 changes, and scrolling older never do; later filtered views display the point without advancing it.
 A session reads the point once as its displayed divider and advances the saved point separately.
-The reader saves only when its reached maximum grows, debounced and on refresh/exit; a failed save is
+`Reached` keeps the furthest navigated position in memory, and `SaveSeen` writes it only when it has
+grown. The interface calls `SaveSeen` on a debounce, after each refresh, and at exit; a failed save is
 logged and never blocks reading.
 
 There is no position or divider before the first advance, including on a fresh, upgraded, or deleted
 database; none is fabricated at launch. Subscription changes never alter it. Sessions and processes
 merge through the maximum in one write, so interleaving cannot regress it. The divider reads
 "You left off here": no count, and never "new", "unread", "since your last visit", or "caught up".
+
+### Refresh rounds
+
+A round reads each configured feed's state and skips the feed when it is not due. Otherwise it waits
+for one of the feed host's two request slots. It then rereads the state, because another process may
+have saved the feed meanwhile, fetches with the cached validators, and saves the adapted outcome with
+`SaveRefresh`. Slots are taken before `Fetch`, so its 30s deadline covers only the request. Feeds on
+different hosts run in parallel; saves serialize in the store without holding a slot.
+
+The report has one result per configured feed, in config order: refreshed, not due, or failing with
+its latest error, which persists while the feed backs off. "Refreshed" includes a 304, and a save that
+another process committed first. `ErrRefreshConflict` is never refetched, because the other process
+just saved that feed. A feed found not due was saved recently, so its earlier failures are forgotten.
+The report carries no counts of new posts. Failures are logged; a failure caused by the caller's
+cancellation starts no backoff.
+
+A round runs under the context of the call that started it. A joining call stops waiting when its own
+context ends, and `Refresh` returns an error only then. If the starting call is canceled, a joining call
+whose context is still live runs a fresh round rather than accepting canceled results. Each joining
+call receives its own copy of the report. Rounds hold no database transaction while fetching, and
+cancellation never leaves a partial save.
 
 ### Paths
 
@@ -196,13 +220,14 @@ From *A Philosophy of Software Design*, 2nd ed. (Ousterhout). Applied to this pr
 The most consequential interface in openfeed is the seam between *what the reader knows* and *how it's displayed*. Get it right and the web server is a weekend's work; get it wrong and you write the app twice. It should look roughly like:
 
 ```go
-Timeline(ctx, Query) ([]Item, error)
-Refresh(ctx) (RefreshResult, error)
-Article(ctx, ItemID) (Article, error)
-AdvanceSeen(ctx, Position) error
+Timeline(ctx, Query) (Page, error)
+Refresh(ctx) (Report, error)
+Article(ctx, ItemID) (Article, error) // later
+Reached(Position)
+SaveSeen(ctx) error
 ```
 
-Four methods hiding conditional GET, ETag handling, GUID dedup, chronological merge, pagination, readability extraction, and caching. Both the TUI and the web server consume exactly this and nothing more.
+A few methods hiding conditional GET, ETag handling, GUID dedup, concurrent polite fetching, chronological merge, pagination, readability extraction, and caching. Both the TUI and the web server consume exactly this and nothing more.
 
 Likewise `internal/store`: its interface speaks in **reader terms**, never SQL terms. If a `*sql.Rows`, a `WHERE` clause, or a driver error ever escapes that package, the abstraction has leaked and storage becomes unswappable.
 

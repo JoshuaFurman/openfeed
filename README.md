@@ -6,7 +6,7 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Configuration loading, feed fetching, refresh persistence, timeline queries, and the saved reading position work as libraries; the UI does not exist yet.
+> Configuration loading, feed fetching, refresh orchestration, persistence, timeline queries, and the saved reading position work as libraries; the UI does not exist yet.
 > The CLI still only prints resolved configuration. [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why

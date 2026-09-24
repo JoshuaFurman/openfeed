@@ -7,39 +7,45 @@ work status and sequencing. Proposals here are not settled decisions until recor
 ## Session handoff
 
 - **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
-  persistence, chronological-range timeline queries across selected active subscriptions, and the
-  saved seen position (`b5384a3`). Settled decisions and contracts are in `AGENTS.md`.
+  persistence, chronological-range timeline queries across selected active subscriptions, the
+  saved seen position (`b5384a3`), and timeline dates capped at first fetch (`0c1d8a3`). Settled
+  decisions and contracts are in `AGENTS.md`.
 - **Current behavior:** `openfeed` still bootstraps/loads config and prints paths and subscriptions.
-  Fetching, persistence, timeline queries, and the seen position are tested libraries, not wired into
-  the command. Schema version 5 orders the timeline by the earlier of publication and first-fetch time.
-  Reader orchestration and TUI do not exist yet.
-- **Last review (seen position, `b5384a3`, after commit):** no correctness failures are reachable
-  today. The stale handoff and the `AGENTS.md` reader sketch (`MarkSeen` → `AdvanceSeen`) are fixed.
-  The recommended timeline-level future-date cap was approved and is implemented below. It resolves:
-  - capped points splitting same-fetch undated posts by feed-document order;
-  - re-saving an orphaned point failing;
-  - the extra item lookup on every advance. A no-op advance still takes the write lock briefly, but
-    writes nothing.
+  Fetching, persistence, timeline queries, the seen position, and reader orchestration are tested
+  libraries, not wired into the command. Schema version 5 orders the timeline by the earlier of
+  publication and first-fetch time. The TUI does not exist yet.
+- **Last review (reader increment, before commit):** 10 findings, all verified against the code.
+  - **Fixed, each with a test that fails without it:**
+    - a joining call whose starter was canceled now runs a fresh round;
+    - state is reread after waiting for a host slot;
+    - a feed found not due forgets its earlier failures;
+    - each joining call gets its own copy of the report;
+    - `SaveSeen` no longer logs the caller's cancellation.
+  - **Doc fixes:** the `Refresh` comment budget, `AGENTS.md` wording that put the seen-save triggers in
+    the reader rather than the interface, and this handoff.
+  - **Rejected, by approved design:** a global cap across hosts (the user chose "all at once") and
+    `SeenPosition` forwarding (recorded as deliberate in `AGENTS.md`).
 
-  Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** review and commit the first-fetch cap increment. Then compare two reader
-  orchestration designs against the refresh requirements recorded in the open-questions table.
-- **Implementation in progress:** the first-fetch cap increment is implemented and verified, but not
-  reviewed or committed. It covers:
-  - migration `005_timeline_first_fetch_cap.sql`, which rebuilds the index;
-  - one shared `effectiveDate` expression and capped observed positions;
-  - a single-statement `AdvanceSeen`;
-  - updated `AGENTS.md` date rules.
+  Earlier: `b5384a3` was reviewed after commit; `0c1d8a3` was never separately reviewed. Item-ID reuse
+  after deleting the highest-ID row remains a hard retention requirement.
+- **Next action:** the user commits the reviewed reader increment. Then do step 2, command wiring:
+  - `main` builds config, a `slog` log file at `LogPath`, the store, the HTTP client, and the reader;
+  - Ctrl-C cancels cleanly;
+  - until the TUI exists, `openfeed` runs one refresh and prints the newest ~20 posts plus a failure
+    summary.
+- **Implementation in progress:** the reader increment (`internal/reader`) is implemented, reviewed,
+  fixed, and verified, but not yet committed. The design was approved this session and recorded in
+  `AGENTS.md` (reader API, refresh policy, refresh rounds).
 
-  Timeline fixtures now fetch after their publication dates, so they keep testing publication order.
 - **Last verification:** formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`,
-  `go mod verify`, and `git diff --check` passed. Store coverage is 93.7% in the no-cgo run; only the
-  commit-failure branch of `AdvanceSeen` is uncovered. Seen and timeline tests passed 25
-  race-detector runs.
+  `go mod verify`, and `git diff --check` passed after the review fixes. Reader coverage is 100% and
+  store coverage 93.7% in the no-cgo run. Reader tests passed 25 race-detector runs; concurrency tests
+  use `testing/synctest` with a real SQLite store, so they need no sleeps.
 
-  Deliberately breaking each rule made a test fail: dropping the cap from the query, the observed
-  position, or the index; and, earlier, last-writer-wins saving, date-only comparison, a reversed
-  tie-breaker, and a foreign key to items. Store tests cross-compile without cgo for Linux/amd64 and
+  Deliberately breaking each reader rule made a test fail: removing the per-host limit; overlapping
+  calls starting their own rounds; cancellation starting backoff; backoff never doubling; conflicts
+  counted as failures; a backwards clock holding a feed; keeping the latest rather than the furthest
+  reached position; and each review fix undone in turn. Reader and store tests cross-compile without cgo for Linux/amd64 and
   Windows/amd64 (compile checks only; runtime verification was on macOS/arm64).
 
 ### Keeping this useful
@@ -91,7 +97,7 @@ Complete these as reviewed increments, not one large change:
   and reviewed.
 - [x] **Cap future dates at first fetch.** Migration `005_timeline_first_fetch_cap.sql` orders the
   timeline by the earlier of publication and first-fetch time, so future-dated posts no longer pin the
-  head or the divider. Review is pending.
+  head or the divider. Committed in `0c1d8a3`.
 
 **Timeline implementation:** [`internal/store/timeline.go`](internal/store/timeline.go) implements the
 approved [timeline read contract](AGENTS.md#timeline-reads). Actual SQLite query plans confirm ordered
@@ -169,19 +175,49 @@ advance, keeps a session's displayed divider, or renders "You left off here".
 - Lifecycle tests now follow the embedded migration count; migration-engine tests start from an
   isolated bookkeeping-only schema so future domain migrations do not change their fixtures.
 
-**Remaining storage work:** review and commit the first-fetch cap increment. Retention remains an
-open question below. Apply the quality gates in `AGENTS.md` to each increment.
+**Remaining storage work:** none planned for v0.1 beyond the retention open question below. Apply the
+quality gates in `AGENTS.md` to each increment.
 
 **Still deferred:** launch refresh, scheduling, rendering, full-text extraction, search, web serving,
 or AI. Do not introduce their packages or schema speculatively.
 
 ### Then: `internal/reader` and command wiring
 
-- [ ] Construct and inject configuration, store, and HTTP dependencies in the command.
-- [ ] Orchestrate subscription selection, fetching, and persistence behind a reader-shaped API.
-- [ ] Handle one feed's failure independently while keeping cached items available.
-- [ ] Implement the chosen refresh policy and expose results without HTTP/SQL details to the UI.
-- [ ] Prove the full refresh → store → timeline path with offline integration tests.
+- [ ] Construct and inject configuration, store, and HTTP dependencies in the command (step 2).
+- [x] Orchestrate subscription selection, fetching, and persistence behind a reader-shaped API.
+- [x] Handle one feed's failure independently while keeping cached items available.
+- [x] Implement the chosen refresh policy and expose results without HTTP/SQL details to the UI.
+- [x] Prove the full refresh → store → timeline path with offline integration tests.
+
+**Reader implementation:** [`internal/reader`](internal/reader) implements the approved
+[reader API, refresh policy](AGENTS.md#2-decisions-made), and [refresh rounds](AGENTS.md#refresh-rounds).
+Reviewed and fixed; commit pending.
+
+**Reader acceptance coverage:**
+
+- `internal/reader/reader_test.go`:
+  - End to end: the real `feed.Client` over an in-memory transport and a temp store; a labeled
+    cross-feed river from RSS and Atom; a second round sending saved validators and recording 304s.
+  - Configured-feed selection and labels, hiding feeds removed from config, and empty config.
+  - Seen bookkeeping: furthest reached position only, zero positions ignored, and saves retried after
+    failure.
+- `internal/reader/refresh_test.go`:
+  - One feed's failure (fetch or save) never fails the round, cached posts stay readable, and failures
+    are logged. A closed store fails every feed without panicking.
+  - With `synctest`:
+    - every host starts at once, with at most 2 requests per host;
+    - overlapping calls share one round with separate copies of the report, and an impatient joiner
+      leaves without cancelling it;
+    - a joiner reruns the round after its starter is canceled;
+    - a queued feed saved elsewhere is not fetched;
+    - cancellation while fetching or waiting for a slot saves nothing and starts no backoff.
+  - The 30s gap holds across readers sharing a database but not for a backwards clock. Backoff runs
+    15s → 10 min and resets on success, including a success elsewhere. A save conflict counts as
+    refreshed and is not refetched.
+    Source order and 304 outcomes reach the store unchanged.
+
+**Command wiring (step 2, approved):** build dependencies in `main` with a `slog` log file and signal
+cancellation. Until the TUI exists, run one refresh and print the newest posts plus a failure summary.
 
 This layer must earn its existence through orchestration, not merely forward store methods.
 The article operation remains deferred until there is a reader pane.
@@ -218,7 +254,6 @@ Resolve a question before the work it affects, not every future question up fron
 |---|---|---|
 | Launch placement and newer-than reads | TUI | Selection-driven advancement is contiguous when the river opens at the seen point and reading moves upward; that needs an ascending "newer than" read or a head-to-divider span load. |
 | Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. `items.id` lacks `AUTOINCREMENT`, so deleting the highest-ID row lets SQLite reuse that ID (verified). Before any deletion, rebuild `items` with `AUTOINCREMENT` or never delete that row; the seen tie-breaker and first-fetch lookup rely on IDs never being reused. |
-| Refresh policy | Reader orchestration | **User requirements (2026-09-24):** refresh on launch while the cached river shows; pull-to-refresh by moving up past the newest post; fetch all feeds concurrently; the backend silently skips a feed fetched within a short gap (~30s), while the gesture still feels like a refresh (spinner, reread); a TUI spinner while refreshing; new posts appear above the cursor. **Still to design:** per-host politeness when many feeds share a host; whether the gap uses the persisted accepted fetch time (works across processes, but failures aren't recorded, so a failing feed would be retried on every pull); `ErrRefreshConflict` handling; progress and per-feed failure reporting; and a reader API that avoids pass-through methods. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 
 ## Later, roughly in order
