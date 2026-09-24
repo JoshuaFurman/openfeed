@@ -337,8 +337,8 @@ func TestTimelinePublicationTransitions(t *testing.T) {
 			if !tc.published.IsZero() && tc.published.Before(first) {
 				effective = tc.published
 			}
-			if item.Position.date != effective.Format(timestampLayout) {
-				t.Errorf("effective date = %s, want %s", item.Position.date, effective.Format(timestampLayout))
+			if item.Position.date != effective.Format(timestampLayout) || !item.EffectiveDate().Equal(effective) {
+				t.Errorf("effective date = %s and %v, want %s", item.Position.date, item.EffectiveDate(), effective.Format(timestampLayout))
 			}
 			saveRefresh(t, s, url, Refresh{FetchedAt: first.Add(100 * time.Hour), Unchanged: true})
 			if got := collectTimeline(t, s, TimelineQuery{FeedURLs: []string{url}, Limit: 1}); !slices.Equal(got, items) {

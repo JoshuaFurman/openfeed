@@ -8,45 +8,50 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 - **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
   persistence, chronological-range timeline queries across selected active subscriptions, the
-  saved seen position (`b5384a3`), and timeline dates capped at first fetch (`0c1d8a3`). Settled
-  decisions and contracts are in `AGENTS.md`.
-- **Current behavior:** `openfeed` still bootstraps/loads config and prints paths and subscriptions.
-  Fetching, persistence, timeline queries, the seen position, and reader orchestration are tested
-  libraries, not wired into the command. Schema version 5 orders the timeline by the earlier of
-  publication and first-fetch time. The TUI does not exist yet.
-- **Last review (reader increment, before commit):** 10 findings, all verified against the code.
+  saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), and reader
+  orchestration (`bf4e163`). Settled decisions and contracts are in `AGENTS.md`.
+- **Current behavior:** `openfeed` loads config, refreshes every subscription through the reader, logs
+  failures to `LogPath`, and prints the 20 newest posts as plain text. This printout is temporary,
+  until the TUI exists. With no subscriptions it prints where to add one. Ctrl-C exits with status
+  130. Schema version 5 orders the timeline by the earlier of publication and first-fetch time.
+- **Last review (command wiring, before commit):** 10 findings, all verified against the code.
   - **Fixed, each with a test that fails without it:**
-    - a joining call whose starter was canceled now runs a fresh round;
-    - state is reread after waiting for a host slot;
-    - a feed found not due forgets its earlier failures;
-    - each joining call gets its own copy of the report;
-    - `SaveSeen` no longer logs the caller's cancellation.
-  - **Doc fixes:** the `Refresh` comment budget, `AGENTS.md` wording that put the seen-save triggers in
-    the reader rather than the interface, and this handoff.
-  - **Rejected, by approved design:** a global cap across hosts (the user chose "all at once") and
-    `SeenPosition` forwarding (recorded as deliberate in `AGENTS.md`).
+    - the exit-status guard always passed (`stop()` cancels the context), so any stray cancellation
+      exited 130 silently. `main` now records which signal arrived, and `exitStatus` is unit-tested;
+    - SIGTERM exits 143;
+    - a failure joined with cancellation, such as a store close error, is still reported;
+    - errors and paths now pass the sanitizer too;
+    - bidi controls are dropped, and line/paragraph separators become spaces;
+    - dates are shown at `store.TimelineItem.EffectiveDate`, so future-dated posts read in river order.
+  - **Also fixed:** the log is kept at 0600 even if it pre-existed, and the stale reader line in this
+    plan.
+  - **Deferred:** display-width-aware columns (CJK or emoji names misalign; the TUI's layout library
+    handles this) and log rotation (below).
 
-  Earlier: `b5384a3` was reviewed after commit; `0c1d8a3` was never separately reviewed. Item-ID reuse
-  after deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** the user commits the reviewed reader increment. Then do step 2, command wiring:
-  - `main` builds config, a `slog` log file at `LogPath`, the store, the HTTP client, and the reader;
-  - Ctrl-C cancels cleanly;
-  - until the TUI exists, `openfeed` runs one refresh and prints the newest ~20 posts plus a failure
-    summary.
-- **Implementation in progress:** the reader increment (`internal/reader`) is implemented, reviewed,
-  fixed, and verified, but not yet committed. The design was approved this session and recorded in
-  `AGENTS.md` (reader API, refresh policy, refresh rounds).
+  Earlier: the reader was reviewed before `bf4e163`, `b5384a3` after its commit, and `0c1d8a3` never
+  separately. Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
+- **Next action:** the user commits command wiring (step 2). Then design the TUI by comparing two
+  approaches. Start with the launch-placement open question and how pull-to-refresh, the spinner,
+  the seen divider, and position-preserving reconciliation fit together.
+- **Implementation in progress:** command wiring (step 2) is implemented, reviewed, fixed, and verified,
+  but not yet committed. The reader increment is committed in `bf4e163`.
 
 - **Last verification:** formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`,
-  `go mod verify`, and `git diff --check` passed after the review fixes. Reader coverage is 100% and
-  store coverage 93.7% in the no-cgo run. Reader tests passed 25 race-detector runs; concurrency tests
-  use `testing/synctest` with a real SQLite store, so they need no sleeps.
+  `go mod verify`, and `git diff --check` passed. Command tests run `run` offline with temporary XDG
+  directories. After the review fixes, every gate passed again, including `staticcheck`'s check
+  that test sources hold no literal format characters. Undoing each fix made a test fail.
 
-  Deliberately breaking each reader rule made a test fail: removing the per-host limit; overlapping
-  calls starting their own rounds; cancellation starting backoff; backoff never doubling; conflicts
-  counted as failures; a backwards clock holding a feed; keeping the latest rather than the furthest
-  reached position; and each review fix undone in turn. Reader and store tests cross-compile without cgo for Linux/amd64 and
-  Windows/amd64 (compile checks only; runtime verification was on macOS/arm64).
+  Smoke runs of the built binary, with temporary XDG directories, used the real network:
+  - Go blog, lobste.rs, and a nonexistent host refreshed in 0.65s. Posts were printed newest first
+    with feed names; the dead host was one failing feed with a readable DNS error, logged at 0600.
+  - An immediate rerun reported both good feeds as already fresh and still printed cached posts.
+  - During a hanging fetch, SIGINT exited within 1s with status 130 and SIGTERM with 143, both with
+    no error output.
+
+  The binary cross-builds for Linux/amd64 and Windows/amd64. Command coverage is 77%; the rest is
+  `main` itself, which the SIGINT smoke run exercised, and setup-error returns. Earlier: reader
+  coverage 100%, 25 reader race runs, and reader and store tests cross-compiling for the same targets.
+  Runtime verification was on macOS/arm64.
 
 ### Keeping this useful
 
@@ -183,7 +188,8 @@ or AI. Do not introduce their packages or schema speculatively.
 
 ### Then: `internal/reader` and command wiring
 
-- [ ] Construct and inject configuration, store, and HTTP dependencies in the command (step 2).
+- [x] Construct and inject configuration, store, and HTTP dependencies in the command (step 2;
+  reviewed, commit pending).
 - [x] Orchestrate subscription selection, fetching, and persistence behind a reader-shaped API.
 - [x] Handle one feed's failure independently while keeping cached items available.
 - [x] Implement the chosen refresh policy and expose results without HTTP/SQL details to the UI.
@@ -191,7 +197,7 @@ or AI. Do not introduce their packages or schema speculatively.
 
 **Reader implementation:** [`internal/reader`](internal/reader) implements the approved
 [reader API, refresh policy](AGENTS.md#2-decisions-made), and [refresh rounds](AGENTS.md#refresh-rounds).
-Reviewed and fixed; commit pending.
+Committed in `bf4e163`.
 
 **Reader acceptance coverage:**
 
@@ -216,8 +222,18 @@ Reviewed and fixed; commit pending.
     refreshed and is not refetched.
     Source order and 304 outcomes reach the store unchanged.
 
-**Command wiring (step 2, approved):** build dependencies in `main` with a `slog` log file and signal
-cancellation. Until the TUI exists, run one refresh and print the newest posts plus a failure summary.
+**Command wiring (step 2):** `cmd/openfeed` builds config, a private `slog` log file, the store, an HTTP
+client, and the reader. Interrupts cancel through the context, and a second interrupt exits
+immediately. Until the TUI exists, the command runs one refresh and prints a status summary, failing
+feeds, and the 20 newest posts, replacing control characters in untrusted text.
+`cmd/openfeed/main_test.go` covers:
+- first launch with no subscriptions;
+- a labeled, ordered, sanitized river alongside a failing feed that is logged, including escape
+  sequences, bidi overrides, line separators, and a future-dated post shown at its river date;
+- a rerun that finds feeds already fresh and still prints cached posts;
+- cancellation mid-refresh that saves nothing and leaves the database reopenable;
+- exit statuses: 130/143 for interrupt/terminate, 1 for cancellation without a signal, and joined
+  failures still reported. Plus sanitizer cases.
 
 This layer must earn its existence through orchestration, not merely forward store methods.
 The article operation remains deferred until there is a reader pane.
@@ -232,6 +248,16 @@ The article operation remains deferred until there is a reader pane.
 - [ ] Show the seen divider and persist the agreed position as the user reads/exits.
 - [ ] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
 - [ ] Verify first-run and cached/offline reading end to end; update user-facing instructions.
+
+TUI requirements already settled:
+- refresh at launch while the cached river shows;
+- pull to refresh by moving up past the newest post, with a spinner and a minimum visible duration;
+- new posts appear above the cursor;
+- the "You left off here" divider, with seen triggers per [`AGENTS.md`](AGENTS.md#seen-position);
+- sanitized terminal text, with dates at `EffectiveDate`;
+- columns sized by display width rather than rune count.
+
+The temporary printout in `cmd/openfeed` goes away when the TUI lands.
 
 ### v0.1 acceptance
 
@@ -259,6 +285,7 @@ Resolve a question before the work it affects, not every future question up fron
 ## Later, roughly in order
 
 - [ ] Reader pane with on-demand full-text extraction and cached fallback to feed content.
+- [ ] Bound the log file, by rotation or size; each run currently appends without limit.
 - [ ] Feed management commands and OPML import/export, after solving TOML round-tripping.
 - [ ] FTS5 search.
 - [ ] Feed/tag filters over the same river.

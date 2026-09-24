@@ -6,8 +6,8 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Configuration loading, feed fetching, refresh orchestration, persistence, timeline queries, and the saved reading position work as libraries; the UI does not exist yet.
-> The CLI still only prints resolved configuration. [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
+> Until the TUI exists, `openfeed` refreshes your subscriptions and prints the newest posts as plain text.
+> [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
 
@@ -65,6 +65,11 @@ tags = ["tech"]          # optional
 
 A malformed subscription fails startup with the offending block named. That is deliberate:
 silently skipping a bad entry would unsubscribe you from a feed you believe you are reading.
+
+Each run fetches every subscription concurrently (at most two requests at a time per website), then
+prints the 20 newest posts. A feed fetched in the last 30 seconds is not fetched again. A failing feed
+never hides posts that are already cached; the run lists it and logs the details. Ctrl-C stops
+cleanly.
 
 ## Files
 

@@ -40,6 +40,15 @@ type TimelineItem struct {
 	Position       TimelineCursor
 }
 
+// EffectiveDate is the time the river orders this item by: the earlier of publication and first fetch.
+// Display it rather than PublishedAt wherever dates should read in river order.
+func (i TimelineItem) EffectiveDate() time.Time {
+	if i.PublishedAt.IsZero() || i.PublishedAt.After(i.FirstFetchedAt) {
+		return i.FirstFetchedAt
+	}
+	return i.PublishedAt
+}
+
 // TimelineQuery selects positions strictly older than Before and no older than Through.
 // Nil boundaries are unrestricted; an empty FeedURLs set selects nothing.
 type TimelineQuery struct {
