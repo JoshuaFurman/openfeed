@@ -6,7 +6,8 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> Until the TUI exists, `openfeed` refreshes your subscriptions and prints the newest posts as plain text.
+> `openfeed` refreshes your subscriptions and opens the river in your terminal. Refreshing while it is
+> open and resuming where you left off are in progress.
 > [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
@@ -66,10 +67,18 @@ tags = ["tech"]          # optional
 A malformed subscription fails startup with the offending block named. That is deliberate:
 silently skipping a bad entry would unsubscribe you from a feed you believe you are reading.
 
-Each run fetches every subscription concurrently (at most two requests at a time per website), then
-prints the 20 newest posts. A feed fetched in the last 30 seconds is not fetched again. A failing feed
-never hides posts that are already cached; the run lists it and logs the details. Ctrl-C stops
-cleanly.
+At launch, openfeed fetches every subscription concurrently (at most two requests at a time per
+website), then opens the river, newest first. A feed fetched in the last 30 seconds is not fetched
+again. A failing feed never hides posts that are already cached; the status line names it, and the
+log has the details.
+
+| Key | Action |
+|---|---|
+| `j` / `k` or ↓ / ↑ | Move through the river; older posts load as you scroll |
+| `g` or Home | Jump to the newest post |
+| `o` or Enter | Open the post's article in your browser |
+| `q` or Ctrl-C | Quit |
+| Ctrl-Z | Suspend to the shell (`fg` returns) |
 
 ## Files
 

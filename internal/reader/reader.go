@@ -18,6 +18,9 @@ import (
 // Position is an observed place in the river; obtain it from Timeline or SeenPosition.
 type Position = store.TimelineCursor
 
+// ItemID identifies a cached post across reloads and publisher updates.
+type ItemID = store.ItemID
+
 // Fetcher retrieves one feed using previous cache validators; feed.Client implements it.
 type Fetcher interface {
 	Fetch(ctx context.Context, feedURL string, previous feed.Validators) (feed.Result, error)
@@ -91,6 +94,9 @@ func New(feeds []config.Feed, st *store.Store, fetcher Fetcher, log *slog.Logger
 	}
 	return r
 }
+
+// Feeds lists the configured subscriptions in config order; the caller may modify the result.
+func (r *Reader) Feeds() []config.Feed { return slices.Clone(r.feeds) }
 
 // Timeline reads one page of the river across every configured subscription.
 // Calls do not share a snapshot; refreshes and date corrections can move posts between pages.

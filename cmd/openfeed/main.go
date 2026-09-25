@@ -1,5 +1,4 @@
 // Command openfeed is a TUI-first RSS reader.
-// Until the TUI exists, it refreshes subscriptions and prints the newest posts.
 package main
 
 import (
@@ -11,17 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"unicode"
 
 	"github.com/JoshuaFurman/openfeed/internal/config"
 	"github.com/JoshuaFurman/openfeed/internal/feed"
 	"github.com/JoshuaFurman/openfeed/internal/reader"
 	"github.com/JoshuaFurman/openfeed/internal/store"
+	"github.com/JoshuaFurman/openfeed/internal/tui"
 )
-
-const previewPosts = 20
 
 func main() {
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -32,12 +28,12 @@ func main() {
 		signal.Stop(signals) // A second signal during cleanup uses the default behavior and exits.
 		cancel(interrupted{received})
 	}()
-	err := run(ctx, os.Stdout, &http.Client{})
+	err := run(ctx, os.Stdout, &http.Client{}, tui.Run)
 	signal.Stop(signals)
 
 	code, report := exitStatus(err, context.Cause(ctx))
 	if report != nil {
-		fmt.Fprintln(os.Stderr, "openfeed:", terminalText(report.Error()))
+		fmt.Fprintln(os.Stderr, "openfeed:", tui.Sanitize(report.Error()))
 	}
 	os.Exit(code)
 }
@@ -84,13 +80,16 @@ func onlyCancellation(err error) bool {
 	}
 }
 
-func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient) (err error) {
+// present shows the river after the launch refresh; tests substitute one that inspects it.
+type present func(ctx context.Context, river tui.River, launch reader.Report) error
+
+func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient, show present) (err error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 	if len(cfg.Feeds) == 0 {
-		fmt.Fprintf(out, "No subscriptions yet. Add a [[feed]] block to %s\n", terminalText(cfg.FilePath()))
+		fmt.Fprintf(out, "No subscriptions yet. Add a [[feed]] block to %s\n", tui.Sanitize(cfg.FilePath()))
 		return nil
 	}
 
@@ -110,6 +109,7 @@ func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient) (err er
 	defer func() { err = errors.Join(err, st.Close()) }()
 	river := reader.New(cfg.Feeds, st, feed.NewClient(httpClient), slog.New(slog.NewTextHandler(logFile, nil)))
 
+	// Until the TUI refreshes on its own, refresh once before it opens.
 	noun := "feeds"
 	if len(cfg.Feeds) == 1 {
 		noun = "feed"
@@ -119,65 +119,5 @@ func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient) (err er
 	if err != nil {
 		return err
 	}
-	printReport(out, report, cfg.LogPath())
-	page, err := river.Timeline(ctx, reader.Query{Limit: previewPosts})
-	if err != nil {
-		return err
-	}
-	printPosts(out, page.Items)
-	return nil
-}
-
-func printReport(out io.Writer, report reader.Report, logPath string) {
-	counts := make(map[reader.Status]int)
-	for _, result := range report.Feeds {
-		counts[result.Status]++
-	}
-	fmt.Fprintf(out, "%d refreshed, %d already fresh, %d failing\n",
-		counts[reader.Refreshed], counts[reader.NotDue], counts[reader.Failing])
-	for _, result := range report.Feeds {
-		if result.Status == reader.Failing {
-			fmt.Fprintf(out, "  %s: %s\n", terminalText(result.Feed.Name), terminalText(result.Err.Error()))
-		}
-	}
-	if counts[reader.Failing] > 0 {
-		fmt.Fprintf(out, "Details: %s\n", terminalText(logPath))
-	}
-	fmt.Fprintln(out)
-}
-
-func printPosts(out io.Writer, items []reader.Item) {
-	if len(items) == 0 {
-		fmt.Fprintln(out, "No posts cached yet.")
-		return
-	}
-	width := 0
-	for _, item := range items {
-		width = max(width, len([]rune(item.FeedName)))
-	}
-	indent := strings.Repeat(" ", len("2006-01-02 15:04")+2+width+2)
-	for _, item := range items {
-		title := item.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-		fmt.Fprintf(out, "%s  %-*s  %s\n", item.EffectiveDate().Local().Format("2006-01-02 15:04"), width,
-			terminalText(item.FeedName), terminalText(title))
-		if item.URL != "" {
-			fmt.Fprintf(out, "%s%s\n", indent, terminalText(item.URL))
-		}
-	}
-}
-
-// terminalText neutralizes characters that could drive the terminal or reorder displayed text.
-func terminalText(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case unicode.Is(unicode.Bidi_Control, r):
-			return -1
-		case unicode.IsControl(r), unicode.In(r, unicode.Zl, unicode.Zp):
-			return ' '
-		}
-		return r
-	}, s)
+	return show(ctx, river, report)
 }

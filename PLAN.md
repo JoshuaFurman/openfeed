@@ -9,52 +9,56 @@ work status and sequencing. Proposals here are not settled decisions until recor
 - **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
   persistence, chronological-range timeline queries across selected active subscriptions, the
   saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), reader
-  orchestration (`bf4e163`), and command wiring with a temporary plain-text river (`56309c5`).
+  orchestration (`bf4e163`), command wiring (`56309c5`), and newer-than timeline reads (`6990119`).
   Settled decisions and contracts are in `AGENTS.md`.
-- **Current behavior:** `openfeed` loads config, refreshes every subscription through the reader, logs
-  failures to `LogPath`, and prints the 20 newest posts as plain text. This printout is temporary,
-  until the TUI exists. With no subscriptions it prints where to add one. Ctrl-C exits with status
-  130. Schema version 5 orders the timeline by the earlier of publication and first-fetch time.
-- **Last review (TUI increment 1, before commit):** 7 findings, all verified; no SQL or crash bugs.
-  - **Contract gaps fixed in `AGENTS.md`:**
-    - when nothing is at or below the saved position, the cursor starts on the oldest post of the
-      `After` page (new resume test case);
-    - pages join by `ItemID`, because the two resume reads don't share a snapshot.
-  - **Also fixed:**
-    - page doc comments that dropped or misstated the continuation rules;
-    - the reader's upward test, which could hang (now capped and checking `Next`) and aliased the
-      returned slice;
-    - inconsistent "older/newer bound" wording.
-  - **Kept, with rationale:** `After` as a separate mode (the user approved option i); and first
-    launch saving the head on the first move. Cached posts before the first launch are history, not a
-    backlog, and `AGENTS.md` now says so.
+- **Current behavior:** `openfeed` loads config, refreshes every subscription (blocking, before the
+  screen opens; this moves into the TUI in increment 3), and then opens the TUI river at the newest post.
+  The river supports `j`/`k`, `g`, `o`, `q`, older paging, resize, empty states, and failing feeds in
+  the status line. With no subscriptions it prints where to add one. Signals exit 130/143 quietly.
+- **Last review (TUI increment 2, before commit):** 10 findings, all verified and fixed, each with a
+  test that fails without its fix:
+  - a failed launch read left a dead "No posts yet" screen; any move now retries it;
+  - the name column shifted as pages loaded; it is now sized once from the configured names, via the
+    new `reader.Feeds`;
+  - failures hid the key hints, which moved to the header;
+  - failure reasons were missing; one failure shows its reason, several point to the log;
+  - Ctrl-Z did nothing; it now suspends;
+  - rows retained feed content; rows are now slim and sanitized once;
+  - ages went stale while idle; a minute tick redraws them;
+  - terminals of 1–2 rows got a taller frame;
+  - one test depended on the time zone (now pinned to UTC);
+  - `x/ansi` was missing from the dependency table.
 
-  Earlier: command wiring was reviewed before `56309c5`, the reader before `bf4e163`, `b5384a3` after
-  its commit, and `0c1d8a3` never separately. Item-ID reuse after deleting the highest-ID row remains a
-  hard retention requirement.
-- **Next action:** the user commits TUI increment 1 (the `After` read). Then build increment 2:
-  river rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout.
-- **Implementation in progress:** TUI increment 1 is implemented, reviewed, fixed, and verified, but
-  not yet committed. It covers:
-  - `store.TimelineQuery.After` with `TimelinePage.Newer`, passed through `reader.Query`/`reader.Page`;
-  - the TUI design and `After` contract recorded in `AGENTS.md` (TUI river, river launch and
-    direction, timeline query contract and reads, Charm v2 dependencies).
+  Earlier: TUI increment 1 was reviewed before `6990119`, command wiring before `56309c5`, the reader
+  before `bf4e163`, `b5384a3` after its commit, and `0c1d8a3` never separately. Item-ID reuse after
+  deleting the highest-ID row remains a hard retention requirement.
+- **Next action:** the user tries TUI increment 2 in a terminal and commits it. Then build increment 3: launch and pull refresh
+  inside the TUI, with the spinner (adding `bubbles/v2`), reconciliation, and failing-feed status. That
+  removes the blocking pre-TUI refresh.
+- **Implementation in progress:** TUI increment 2 is implemented, reviewed, fixed, and verified, but
+  not yet committed. It adds:
+  - `internal/tui` (model, view, `Sanitize`, opener, `Run`);
+  - Bubble Tea and Lip Gloss v2;
+  - `reader.ItemID` and `reader.Feeds`;
+  - `cmd/openfeed` handing off to `tui.Run`, which replaces the plain-text printout.
 
-- **Last verification (increment 1):** formatting, uncached full race and no-cgo tests, `go vet`,
-  `staticcheck`, `go mod verify`, and `git diff --check` passed. Store coverage is 94.4% and reader
-  100%. Store timeline/seen and reader tests passed 25 race-detector runs. Query plans show the `After`
-  read seeking the timeline index without a sort, in tie-heavy and sparse fixtures.
+- **Last verification (increment 2):** formatting, uncached full race and no-cgo tests, `go vet`,
+  `staticcheck` (including no literal format characters in sources), `go mod verify`, and
+  `git diff --check` passed after the review fixes. TUI coverage is 92.0%; the rest is `openBrowser`
+  (launches a real browser) and `Run`'s terminal wrapper. TUI tests passed 25 race-detector runs, and
+  undoing each review fix made a test fail.
 
-  Deliberately breaking each rule made a test fail:
-  - pages left oldest-first;
-  - `Newer` pointing at the oldest post;
-  - combinations accepted;
-  - selecting the newest rather than the nearest posts;
-  - an inclusive bound;
-  - dropping the scalar seek bound.
+  Deliberately breaking each model rule made a test fail:
+  - newer pages moving the cursor;
+  - stale pages merging after `g`;
+  - duplicate posts;
+  - older pages loading only at the edge;
+  - `g` without a head reload;
+  - unsanitized titles.
 
-  Store tests cross-compile for Linux/amd64 and Windows/amd64; runtime verification was on
-  macOS/arm64. Command wiring (`56309c5`) was verified with offline tests and real-network smoke runs.
+  In a real pseudo-terminal, the built binary refreshed real feeds, entered and left the alternate
+  screen, rendered the header hints, ages, names, and titles, showed "dead failed: <reason>", moved
+  with `j`, and quit with `q` (exit 0), before and after the review fixes. The binary cross-builds for Linux/amd64 and Windows/amd64.
 
 ### Keeping this useful
 
@@ -248,11 +252,11 @@ The article operation remains deferred until there is a reader pane.
 
 ### Then: `internal/tui`
 
-- [ ] Render one chronological river from the reader API, with config-owned source labels.
+- [x] Render one chronological river from the reader API, with config-owned source labels.
 - [ ] Automatically load older history while scrolling and reconcile refreshed results without
   silent head/history gaps or duplicate visible identities; implement the agreed position-preserving
   refresh behavior and settle anchor-movement edge cases before implementation.
-- [ ] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
+- [x] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
 - [ ] Show the seen divider and persist the agreed position as the user reads/exits.
 - [ ] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
 - [ ] Verify first-run and cached/offline reading end to end; update user-facing instructions.
@@ -265,7 +269,20 @@ TUI requirements already settled:
 - sanitized terminal text, with dates at `EffectiveDate`;
 - columns sized by display width rather than rune count.
 
-The temporary printout in `cmd/openfeed` goes away when the TUI lands.
+**TUI acceptance coverage (increment 2):** `internal/tui/tui_test.go` drives the model as the event loop
+does, over a real reader and temporary store. It covers:
+- exact rendering (ages, wide feed names, sanitized and untitled titles, height, alternate screen);
+- lines fitting every width, and a name column sized from config that never shifts;
+- older paging and bounds;
+- resumed windows reading upward with the cursor kept on its post;
+- `g` with stale-page dropping;
+- overlapping pages never duplicating posts;
+- opening, including missing links and opener errors;
+- resize keeping the cursor visible, down to one row;
+- loading, empty, failing-feed, read-error, and launch-read-retry states;
+- quit, suspend, the minute tick, context cancellation through `run`, and `age`.
+
+`text_test.go` covers `Sanitize`.
 
 **TUI design (approved: B, resume where you left off; recorded in
 [`AGENTS.md`](AGENTS.md#tui-river)):**
@@ -287,8 +304,9 @@ The temporary printout in `cmd/openfeed` goes away when the TUI lands.
 - Dependencies: `charm.land/bubbletea/v2` v2.0.10, `charm.land/bubbles/v2` v2.2.1 (spinner), and
   `charm.land/lipgloss/v2` v2.0.6 (layout and display width).
 - Increments:
-  1. The newer-than read (implemented and reviewed; commit pending).
-  2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout.
+  1. The newer-than read (`6990119`).
+  2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout
+     (implemented and reviewed; commit pending).
   3. Launch and pull refresh with reconciliation.
   4. Seen: divider, resume placement, and saves.
 

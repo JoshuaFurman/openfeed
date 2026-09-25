@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
+
+	"github.com/JoshuaFurman/openfeed/internal/reader"
+	"github.com/JoshuaFurman/openfeed/internal/tui"
 )
 
 type transport func(*http.Request) (*http.Response, error)
@@ -46,10 +49,47 @@ func offline(t *testing.T) *http.Client {
 	})}
 }
 
+func never(t *testing.T) present {
+	return func(context.Context, tui.River, reader.Report) error {
+		t.Error("the river was presented")
+		return nil
+	}
+}
+
+// presented is what run handed to the TUI: the launch report and the whole river, labeled.
+type presented struct {
+	statuses []reader.Status
+	river    []string
+}
+
+func capture(t *testing.T, into *presented) present {
+	return func(ctx context.Context, river tui.River, launch reader.Report) error {
+		for _, result := range launch.Feeds {
+			into.statuses = append(into.statuses, result.Status)
+		}
+		query := reader.Query{}
+		for range 100 {
+			page, err := river.Timeline(ctx, query)
+			if err != nil {
+				return err
+			}
+			for _, item := range page.Items {
+				into.river = append(into.river, item.Title+"@"+item.FeedName)
+			}
+			if page.Next == nil {
+				return nil
+			}
+			query.Before = page.Next
+		}
+		t.Fatal("river did not end")
+		return nil
+	}
+}
+
 func TestRunFirstLaunch(t *testing.T) {
 	configPath, _ := isolate(t)
 	var out bytes.Buffer
-	if err := run(t.Context(), &out, offline(t)); err != nil {
+	if err := run(t.Context(), &out, offline(t), never(t)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "No subscriptions yet") || !strings.Contains(out.String(), configPath) {
@@ -60,7 +100,7 @@ func TestRunFirstLaunch(t *testing.T) {
 	}
 }
 
-func TestRunRefreshesAndPrintsRiver(t *testing.T) {
+func TestRunRefreshesThenPresentsRiver(t *testing.T) {
 	configPath, logPath := isolate(t)
 	writeConfig(t, configPath, `
 [[feed]]
@@ -71,11 +111,10 @@ name = "good"
 url  = "https://broken.example/feed"
 name = "broken"
 `)
-	// JSON Feed, unlike XML 1.0, can carry the ESC character that starts terminal control sequences.
 	const jsonFeed = `{"version": "https://jsonfeed.org/version/1.1", "title": "Good", "items": [
 		{"id": "1", "title": "Older post", "url": "https://good.example/1", "date_published": "2025-09-01T10:00:00Z"},
-		{"id": "2", "title": "Newer \u001b[2Jpost", "url": "https://good.example/2", "date_published": "2025-09-02T10:00:00Z"},
-		{"id": "3", "title": "Scheduled \u202egnp.exe\u2028post", "url": "https://good.example/3", "date_published": "2099-01-01T00:00:00Z"}
+		{"id": "2", "title": "Newer post", "url": "https://good.example/2", "date_published": "2025-09-02T10:00:00Z"},
+		{"id": "3", "title": "Scheduled post", "url": "https://good.example/3", "date_published": "2099-01-01T00:00:00Z"}
 	]}`
 	client := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host == "broken.example" {
@@ -85,41 +124,30 @@ name = "broken"
 	})}
 
 	var out bytes.Buffer
-	if err := run(t.Context(), &out, client); err != nil {
+	var first presented
+	if err := run(t.Context(), &out, client, capture(t, &first)); err != nil {
 		t.Fatal(err)
 	}
-	got := out.String()
-	for _, want := range []string{"1 refreshed, 0 already fresh, 1 failing", "broken: fetch https://broken.example/feed: HTTP 500", "Details: " + logPath} {
-		if !strings.Contains(got, want) {
-			t.Errorf("output lacks %q:\n%s", want, got)
-		}
+	if out.String() != "Refreshing 2 feeds…\n" {
+		t.Errorf("output = %q", out.String())
 	}
-	newer, older := strings.Index(got, "good  Newer  [2Jpost"), strings.Index(got, "good  Older post")
-	if newer < 0 || older < newer || !strings.Contains(got, "https://good.example/2") {
-		t.Errorf("river is missing, out of order, or unsanitized:\n%q", got)
+	if !slices.Equal(first.statuses, []reader.Status{reader.Refreshed, reader.Failing}) {
+		t.Errorf("launch statuses = %v", first.statuses)
 	}
-	if strings.ContainsAny(got, "\x1b\u202e\u2028") {
-		t.Error("feed text wrote a terminal escape, bidi override, or line separator")
-	}
-	scheduled := strings.Index(got, "good  Scheduled gnp.exe post")
-	if scheduled < 0 {
-		t.Fatalf("future-dated post is missing or unsanitized:\n%s", got)
-	}
-	line := got[strings.LastIndex(got[:scheduled], "\n")+1:]
-	// A post dated 2099 is shown at its first fetch, which is now, in river order.
-	if shown, err := time.ParseInLocation("2006-01-02 15:04", line[:16], time.Local); err != nil || time.Since(shown).Abs() > time.Hour {
-		t.Errorf("future-dated post shown at %q, not its river date", line[:16])
+	// The 2099 post sorts at its first fetch, which is now.
+	if want := []string{"Scheduled post@good", "Newer post@good", "Older post@good"}; !slices.Equal(first.river, want) {
+		t.Errorf("river = %v, want %v", first.river, want)
 	}
 	if logs, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(logs), "https://broken.example/feed") {
 		t.Errorf("failure was not logged: %q, %v", logs, err)
 	}
 
-	out.Reset()
-	if err := run(t.Context(), &out, client); err != nil {
+	var second presented
+	if err := run(t.Context(), &out, client, capture(t, &second)); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "0 refreshed, 1 already fresh, 1 failing") || !strings.Contains(out.String(), "Older post") {
-		t.Errorf("second run did not show cached posts with a fresh feed:\n%s", out.String())
+	if !slices.Equal(second.statuses, []reader.Status{reader.NotDue, reader.Failing}) || !slices.Equal(second.river, first.river) {
+		t.Errorf("second run = %+v; want a fresh feed and the same cached river", second)
 	}
 }
 
@@ -133,19 +161,29 @@ func TestRunCanceledDuringRefresh(t *testing.T) {
 		return nil, req.Context().Err()
 	})}
 	var out bytes.Buffer
-	if err := run(ctx, &out, client); !errors.Is(err, context.Canceled) {
+	if err := run(ctx, &out, client, never(t)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled run returned %v", err)
-	}
-	if strings.Contains(out.String(), "refreshed") {
-		t.Errorf("canceled run printed results:\n%s", out.String())
 	}
 	unavailable := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 	})}
-	var again bytes.Buffer
-	err := run(t.Context(), &again, unavailable)
-	if err != nil || !strings.Contains(again.String(), "0 refreshed, 0 already fresh, 1 failing") {
-		t.Errorf("database did not reopen cleanly, or the canceled round saved something: %v\n%s", err, again.String())
+	var again presented
+	err := run(t.Context(), &out, unavailable, capture(t, &again))
+	if err != nil || !slices.Equal(again.statuses, []reader.Status{reader.Failing}) {
+		t.Errorf("database did not reopen cleanly, or the canceled round saved something: %v, %+v", err, again)
+	}
+}
+
+func TestRunReturnsPresenterErrors(t *testing.T) {
+	configPath, _ := isolate(t)
+	writeConfig(t, configPath, "[[feed]]\nurl = \"https://a.example/feed\"\n")
+	unavailable := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
+	})}
+	failure := errors.New("terminal lost")
+	err := run(t.Context(), io.Discard, unavailable, func(context.Context, tui.River, reader.Report) error { return failure })
+	if !errors.Is(err, failure) {
+		t.Errorf("run returned %v, want the presenter's error", err)
 	}
 }
 
@@ -172,20 +210,5 @@ func TestExitStatus(t *testing.T) {
 				t.Errorf("exitStatus = %d, %v; want %d, %v", code, report, tc.code, tc.report)
 			}
 		})
-	}
-}
-
-func TestTerminalText(t *testing.T) {
-	for in, want := range map[string]string{
-		"plain ASCII":                     "plain ASCII",
-		"日本語 and emoji 👩\u200d💻":          "日本語 and emoji 👩\u200d💻",
-		"clear\x1b[2Jscreen":              "clear [2Jscreen",
-		"bell\a tab\t newline\n C1\u009b": "bell  tab  newline  C1 ",
-		"evil\u202eexe.txt\u2066":         "evilexe.txt",
-		"line\u2028para\u2029end":         "line para end",
-	} {
-		if got := terminalText(in); got != want {
-			t.Errorf("terminalText(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

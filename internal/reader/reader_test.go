@@ -224,6 +224,12 @@ func TestTimelineLabelsAndSelection(t *testing.T) {
 		t.Errorf("upward pages = %v, want labeled posts above the oldest", got)
 	}
 
+	listed := r.Feeds()
+	listed[0].Name = "changed"
+	if got := r.Feeds(); !reflect.DeepEqual(got, feeds) {
+		t.Errorf("Feeds = %v, want the configured feeds unchanged", got)
+	}
+
 	empty := New(nil, st, fetchFunc(func(context.Context, string, feed.Validators) (feed.Result, error) {
 		t.Error("empty config fetched")
 		return feed.Result{}, nil

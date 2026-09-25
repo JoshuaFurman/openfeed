@@ -42,7 +42,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
 | **Source of truth** | **Config is intent; the DB is local state.** Feeds are declared in hand-editable `config.toml`. The DB holds feed caches, derived data, and the saved reading position; it never owns a subscription. | Deleting `openfeed.db` never loses a subscription. It does lose the reading position, which is not regenerable, and cached posts that have left their feeds' windows. Subscriptions stay greppable and version-controllable. |
 | **Item models** | `feed.Item` represents publisher data; `store.RefreshItem` and `store.TimelineItem` are separate store-owned input and read models. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
-| **Untrusted terminal text** | Every string written to a terminal passes one sanitizer: titles, URLs, config names, paths, and errors. Control characters and line/paragraph separators become spaces, and bidirectional formatting characters are dropped. Dates shown in the river are `EffectiveDate`, not raw publication dates. | Feed text can carry escape sequences that rewrite the screen or change terminal state, and bidi overrides can make a URL display as a different host. One rule for every string leaves no unsanitized path. Effective dates keep the list reading in river order when a publisher's date is in the future. |
+| **Untrusted terminal text** | Every string written to a terminal passes one sanitizer, `tui.Sanitize`: titles, URLs, config names, paths, and errors. Control characters and line/paragraph separators become spaces, and bidirectional formatting characters are dropped. Dates shown in the river are `EffectiveDate`, not raw publication dates. | Feed text can carry escape sequences that rewrite the screen or change terminal state, and bidi overrides can make a URL display as a different host. One rule for every string leaves no unsanitized path. Effective dates keep the list reading in river order when a publisher's date is in the future. |
 | **Feed labels** | Resolved config names are authoritative, including the hostname fallback. Fetched titles never rename subscriptions. | No naming-provenance flag or config changes needed for fetching. |
 | **Item identity** | Within the configured feed URL: publisher ID → usable article URL → SHA-256 of title, feed content, and publication date when present. | Prefer stable identifiers; hashing is a best-effort fallback whose key can change after edits. Different subscriptions retain separate entries. |
 | **Duplicate keys** | Within one response, the first normalized occurrence of a key wins as a whole item. Storage owns this rule; the reader preserves source order. | First and last position are both imperfect freshness signals. Respect source order rather than infer freshness from dates or merge contradictory entries. |
@@ -193,9 +193,16 @@ The river is a custom windowed list rendered with Lip Gloss, not `bubbles/list`,
 and adds a filter UI. The loaded window is one contiguous span. Pages of 50 load as the cursor nears
 either edge: older pages by `Before`, newer pages by `After`. Pages join by `ItemID`: a post already in
 the window is never added twice, and one that moved past a page boundary between reads appears at the
-next reload. The cursor follows its post by `ItemID` across reloads. The divider stays at the session's launch baseline and reads
-"── You left off here ──". Rows show `EffectiveDate` age, the config feed name, and the title. Every
-string passes the terminal sanitizer, and columns are sized by display width.
+next reload. The cursor follows its post by `ItemID` across reloads. A page requested before `g`
+replaced the window is dropped. The divider stays at the session's launch baseline and reads
+"── You left off here ──". Rows show the `EffectiveDate` age (now, minutes, hours, days, then the
+date, redrawn each minute), the config feed name, and the title, "(untitled)" when a post has none.
+Rows keep only what the list shows, sanitized once when their page loads; feed content stays in the
+store. The name column is sized once from the configured names, so it never shifts as pages load.
+Every string passes `tui.Sanitize`, and columns are sized by display width. The header carries the key
+hints; the status line shows notices and launch failures (one failure with its reason, several with
+their names and a pointer to the log). A failed page load shows in the status line, and the next move
+retries it, including a failed launch read. Terminals under three rows drop the header and status.
 
 Moving up past the newest post, when nothing newer exists, refreshes; so does launch, while the cached
 river shows. A spinner shows for at least 600ms, and the status line names failing feeds but never
@@ -205,8 +212,10 @@ changes inside it are reconciled at the next head reload.
 
 Every navigation reaches both the post left and the post landed on, and `g` and `o` reach their post.
 Launch placement and refreshes never do. `SaveSeen` runs after 2s idle, after each refresh, and at
-exit. Keys: `j`/`k` move, `g` jumps to the newest, `o` opens the article URL through the platform opener
-without a shell, and `q` or Ctrl-C quits.
+exit. Keys: `j`/`k` or the arrows move, `g` or Home jumps to the newest, `o` or Enter opens the article
+URL through the platform opener without a shell, `q` or Ctrl-C quits, and Ctrl-Z suspends (raw mode
+delivers it as a key). `tui.Run` returns the context's
+error when canceled; Bubble Tea's own signal handler is disabled so that the command owns signals.
 
 ### Paths
 
@@ -366,7 +375,9 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | Package | Status | Why this one |
 |---|---|---|
 | `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
-| `charm.land/bubbletea/v2` · `bubbles/v2` · `lipgloss/v2` | approved | TUI event loop, spinner, and layout with display-width-aware styling. v2 is the current stable line (2.0.10 / 2.2.1 / 2.0.6 at approval). `bubbles/list` is deliberately unused. |
+| `charm.land/bubbletea/v2` · `lipgloss/v2` | in use | TUI event loop and display-width-aware styling. v2 is the current stable line (2.0.10 / 2.0.6). |
+| `charm.land/bubbles/v2` | approved | The refresh spinner, added with increment 3. `bubbles/list` is deliberately unused. |
+| `github.com/charmbracelet/x/ansi` | in use | Display-cell width and ANSI-aware truncation for the river's columns. Already a Lip Gloss dependency, so using it directly adds nothing to the build. |
 | `cobra` | planned | CLI |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
 | `modernc.org/sqlite` | in use | pure-Go, no cgo (see §2) |
