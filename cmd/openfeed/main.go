@@ -80,8 +80,8 @@ func onlyCancellation(err error) bool {
 	}
 }
 
-// present shows the river after the launch refresh; tests substitute one that inspects it.
-type present func(ctx context.Context, river tui.River, launch reader.Report) error
+// present shows the river; tests substitute one that inspects it.
+type present func(ctx context.Context, river tui.River) error
 
 func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient, show present) (err error) {
 	cfg, err := config.Load()
@@ -108,16 +108,5 @@ func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient, show pr
 	}
 	defer func() { err = errors.Join(err, st.Close()) }()
 	river := reader.New(cfg.Feeds, st, feed.NewClient(httpClient), slog.New(slog.NewTextHandler(logFile, nil)))
-
-	// Until the TUI refreshes on its own, refresh once before it opens.
-	noun := "feeds"
-	if len(cfg.Feeds) == 1 {
-		noun = "feed"
-	}
-	fmt.Fprintf(out, "Refreshing %d %s…\n", len(cfg.Feeds), noun)
-	report, err := river.Refresh(ctx)
-	if err != nil {
-		return err
-	}
-	return show(ctx, river, report)
+	return show(ctx, river)
 }

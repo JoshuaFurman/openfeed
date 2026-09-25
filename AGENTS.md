@@ -57,7 +57,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
 | **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds with config names, `Refresh`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
-| **Refresh policy** | Refresh at launch, while the cached river shows, and on pull (moving up past the newest post). Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
+| **Refresh policy** | Refresh at launch, while the cached river shows, and on pull: a double-tap of `k` or ↑ at the newest post. Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. A double-tap rather than a single press stops a stray tap, or scrolling up with a held key, from refreshing. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
@@ -204,11 +204,21 @@ hints; the status line shows notices and launch failures (one failure with its r
 their names and a pointer to the log). A failed page load shows in the status line, and the next move
 retries it, including a failed launch read. Terminals under three rows drop the header and status.
 
-Moving up past the newest post, when nothing newer exists, refreshes; so does launch, while the cached
-river shows. A spinner shows for at least 600ms, and the status line names failing feeds but never
-counts posts. After a refresh, a window that includes the head is reloaded from the head through its
-oldest post, so new posts land above the cursor. Otherwise, new posts wait above the window, and
-changes inside it are reconciled at the next head reload.
+At the newest post, when nothing newer exists, two separate taps of `k` or ↑ within 400ms refresh; so
+does launch, while the cached river shows. The press that reaches the top is not a tap. A held key's
+autorepeat never counts: presses flagged as repeats, or closer than 80ms apart, do not arm a pull. The
+first tap shows "Press again to refresh." The header shows a spinner and "refreshing" for at least
+600ms, and a pull during a refresh is ignored. The status line names the latest refresh's failing feeds but never counts posts.
+After a refresh, a window that includes the head is reloaded from the head through its oldest post, in
+200-post pages, so new posts land above the cursor. Older rows loaded meanwhile are kept. The cursor
+stays on its post (or, if that post left the span, the nearest older post) at the same screen row. An
+empty or unread window, or one with a head read still pending, loads a fresh head page instead. Head
+reads are numbered, and a superseded one is dropped. At most one span reload runs at a time. A refresh
+that finishes during one, or rows loaded below the span meanwhile, trigger one more reload after it
+lands, and a failed reload is retried by the next move. A window below the head leaves new posts
+waiting above it, and changes inside it are reconciled at the next head reload. Quitting cancels
+commands still using the river and waits for them, because Bubble Tea does not, so the caller can
+close the store safely.
 
 Every navigation reaches both the post left and the post landed on, and `g` and `o` reach their post.
 Launch placement and refreshes never do. `SaveSeen` runs after 2s idle, after each refresh, and at
@@ -376,7 +386,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 |---|---|---|
 | `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
 | `charm.land/bubbletea/v2` · `lipgloss/v2` | in use | TUI event loop and display-width-aware styling. v2 is the current stable line (2.0.10 / 2.0.6). |
-| `charm.land/bubbles/v2` | approved | The refresh spinner, added with increment 3. `bubbles/list` is deliberately unused. |
+| `charm.land/bubbles/v2` | in use | The refresh spinner. `bubbles/list` is deliberately unused. |
 | `github.com/charmbracelet/x/ansi` | in use | Display-cell width and ANSI-aware truncation for the river's columns. Already a Lip Gloss dependency, so using it directly adds nothing to the build. |
 | `cobra` | planned | CLI |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |

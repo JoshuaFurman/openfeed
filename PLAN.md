@@ -9,56 +9,61 @@ work status and sequencing. Proposals here are not settled decisions until recor
 - **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
   persistence, chronological-range timeline queries across selected active subscriptions, the
   saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), reader
-  orchestration (`bf4e163`), command wiring (`56309c5`), and newer-than timeline reads (`6990119`).
+  orchestration (`bf4e163`), command wiring (`56309c5`), newer-than timeline reads (`6990119`), and
+  the TUI river (`c0b67a3`).
   Settled decisions and contracts are in `AGENTS.md`.
-- **Current behavior:** `openfeed` loads config, refreshes every subscription (blocking, before the
-  screen opens; this moves into the TUI in increment 3), and then opens the TUI river at the newest post.
-  The river supports `j`/`k`, `g`, `o`, `q`, older paging, resize, empty states, and failing feeds in
-  the status line. With no subscriptions it prints where to add one. Signals exit 130/143 quietly.
-- **Last review (TUI increment 2, before commit):** 10 findings, all verified and fixed, each with a
-  test that fails without its fix:
-  - a failed launch read left a dead "No posts yet" screen; any move now retries it;
-  - the name column shifted as pages loaded; it is now sized once from the configured names, via the
-    new `reader.Feeds`;
-  - failures hid the key hints, which moved to the header;
-  - failure reasons were missing; one failure shows its reason, several point to the log;
-  - Ctrl-Z did nothing; it now suspends;
-  - rows retained feed content; rows are now slim and sanitized once;
-  - ages went stale while idle; a minute tick redraws them;
-  - terminals of 1–2 rows got a taller frame;
-  - one test depended on the time zone (now pinned to UTC);
-  - `x/ansi` was missing from the dependency table.
+- **Current behavior:** `openfeed` loads config and opens the TUI river at the newest cached post. It
+  refreshes in the background at launch and when the user pulls past the newest post; a spinner shows
+  meanwhile. New posts land above the cursor, and failing feeds show in the status line. With no
+  subscriptions it prints where to add one. Signals exit 130/143 quietly. There is no seen divider or
+  resume placement yet (increment 4).
+- **Last review (TUI increment 3, before commit):** 10 findings, all verified.
+  - **Fixed, each with a test that fails without it:**
+    - a failed reload after a refresh was never retried (the next move now retries it);
+    - quitting mid-refresh returned while the refresh still used the store that `main` then closed
+      (quitting now cancels and waits);
+    - rows loaded during a reload were kept stale (now reread);
+    - concurrent reloads could drop the newer one (now one at a time, plus one more);
+    - a refresh during a pending head read was lost (the read is reissued);
+    - the empty state offered a pull during a running refresh.
+  - **Also fixed:** `go.mod` listed Bubbles as indirect (`go mod tidy`; tidiness is now a gate), the
+    dependency table, and `cmd` test names, which now say they check wiring. The TUI tests own the
+    launch refresh.
+  - **Deferred:** every refresh rereads and rebuilds the whole loaded span. The cost is bounded by the
+    window; measure before optimizing (for example, by skipping content in span reads).
 
-  Earlier: TUI increment 1 was reviewed before `6990119`, command wiring before `56309c5`, the reader
-  before `bf4e163`, `b5384a3` after its commit, and `0c1d8a3` never separately. Item-ID reuse after
-  deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** the user tries TUI increment 2 in a terminal and commits it. Then build increment 3: launch and pull refresh
-  inside the TUI, with the spinner (adding `bubbles/v2`), reconciliation, and failing-feed status. That
-  removes the blocking pre-TUI refresh.
-- **Implementation in progress:** TUI increment 2 is implemented, reviewed, fixed, and verified, but
-  not yet committed. It adds:
-  - `internal/tui` (model, view, `Sanitize`, opener, `Run`);
-  - Bubble Tea and Lip Gloss v2;
-  - `reader.ItemID` and `reader.Feeds`;
-  - `cmd/openfeed` handing off to `tui.Run`, which replaces the plain-text printout.
+  Earlier: TUI increment 2 was reviewed before `c0b67a3`, and TUI increment 1 before `6990119`.
+  Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
+- **Next action:** the user commits TUI increment 3. Then increment 4: the "You left off here"
+  divider, resume placement (the `After`-then-`Before` launch reads), and seen saving (`Reached` on
+  navigation, `g` and `o`; `SaveSeen` on a 2s debounce, after refreshes, and at exit).
+- **Implementation in progress:** TUI increment 3 is implemented, reviewed, fixed, and verified, but
+  not yet committed. It covers:
+  - launch refresh and double-tap pull refresh inside the TUI, with the Bubbles spinner (at least
+    600ms). A held key's autorepeat never pulls;
+  - span reconciliation that keeps rows loaded meanwhile and the cursor on its post;
+  - numbered head reads, and refresh-driven failure status;
+  - `tui.Run(ctx, river)`;
+  - the blocking pre-TUI refresh removed from `cmd/openfeed`.
 
-- **Last verification (increment 2):** formatting, uncached full race and no-cgo tests, `go vet`,
-  `staticcheck` (including no literal format characters in sources), `go mod verify`, and
-  `git diff --check` passed after the review fixes. TUI coverage is 92.0%; the rest is `openBrowser`
-  (launches a real browser) and `Run`'s terminal wrapper. TUI tests passed 25 race-detector runs, and
-  undoing each review fix made a test fail.
+- **Last verification (increment 3, after review fixes):** every gate passed:
+  - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
+  - `go mod verify`, and `go mod tidy -diff`, now a gate;
+  - `git diff --check`, and a scan for literal format characters in Go sources.
 
-  Deliberately breaking each model rule made a test fail:
-  - newer pages moving the cursor;
-  - stale pages merging after `g`;
-  - duplicate posts;
-  - older pages loading only at the edge;
-  - `g` without a head reload;
-  - unsanitized titles.
+  TUI coverage is 93.9%, and TUI tests passed 25 race-detector runs. Deliberately breaking each
+  refresh rule and each review fix made a test fail.
 
-  In a real pseudo-terminal, the built binary refreshed real feeds, entered and left the alternate
-  screen, rendered the header hints, ages, names, and titles, showed "dead failed: <reason>", moved
-  with `j`, and quit with `q` (exit 0), before and after the review fixes. The binary cross-builds for Linux/amd64 and Windows/amd64.
+  In a real pseudo-terminal:
+  - with an empty database, the binary showed "No posts yet. Refreshing…" and the spinner, filled the
+    river, showed "dead failed: <reason>", and quit (exit 0);
+  - pressing `q` while a fetch was stuck on an unreachable host exited in 2.1s (exit 0), with an
+    empty log: no work outlived the store;
+  - after the switch to double-tap, a `kkkkkk` burst (like a held key) did not refresh, while `k`,
+    150ms, `k` showed "Press again to refresh." and then the spinner (both exit 0). TUI coverage is
+    94.2%, TUI tests passed 25 race-detector runs, and undoing each double-tap rule made a test fail.
+
+  The binary cross-builds for Linux/amd64 and Windows/amd64.
 
 ### Keeping this useful
 
@@ -253,7 +258,7 @@ The article operation remains deferred until there is a reader pane.
 ### Then: `internal/tui`
 
 - [x] Render one chronological river from the reader API, with config-owned source labels.
-- [ ] Automatically load older history while scrolling and reconcile refreshed results without
+- [x] Automatically load older history while scrolling and reconcile refreshed results without
   silent head/history gaps or duplicate visible identities; implement the agreed position-preserving
   refresh behavior and settle anchor-movement edge cases before implementation.
 - [x] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
@@ -263,7 +268,8 @@ The article operation remains deferred until there is a reader pane.
 
 TUI requirements already settled:
 - refresh at launch while the cached river shows;
-- pull to refresh by moving up past the newest post, with a spinner and a minimum visible duration;
+- pull to refresh with a double-tap of `k`/↑ at the newest post (user decision, 2026-09-25: a single
+  press refreshed too easily), with a spinner and a minimum visible duration;
 - new posts appear above the cursor;
 - the "You left off here" divider, with seen triggers per [`AGENTS.md`](AGENTS.md#seen-position);
 - sanitized terminal text, with dates at `EffectiveDate`;
@@ -284,11 +290,28 @@ does, over a real reader and temporary store. It covers:
 
 `text_test.go` covers `Sanitize`.
 
+**TUI acceptance coverage (increment 3):** a fake fetcher drives real refreshes through the reader and
+store. Tests cover:
+- the launch refresh landing new posts above the cursor;
+- pull-to-refresh, with a second pull ignored and no pull or reload below the head;
+- the double-tap gesture: single taps, taps too far apart, an intervening key, flagged and unflagged
+  autorepeat, a tap after holding, arriving at the top, and the "Press again" prompt;
+- span reconciliation with corrections and a late discovery, keeping each post once;
+- the cursor moving to the nearest older post when its post leaves;
+- rows loaded during a reload being kept;
+- failure status clearing on recovery, and cancellation stopping the spinner;
+- an empty river filling after a refresh;
+- superseded head reads being dropped;
+- the spinner running only while refreshing, for at least its minimum time;
+- after review: failed reloads retried on the next move, one reload at a time plus one more, rows loaded
+  mid-reload reread, pending head reads reissued, the empty state during a refresh, and quitting waiting
+  for work.
+
 **TUI design (approved: B, resume where you left off; recorded in
 [`AGENTS.md`](AGENTS.md#tui-river)):**
 
 - Launch placement: resume at the saved position, with newer posts above, reading upward. Pressing up
-  past the newest post refreshes, and `g` jumps to the newest. This needs a store/reader "newer than"
+  past the newest post refreshes (later changed to a double-tap), and `g` jumps to the newest. This needs a store/reader "newer than"
   read (increment 1). Opening at the newest (Twitter-style) was rejected, because its divider marks
   skipped posts as passed.
 - Shared: a custom windowed list rendered with Lip Gloss, not `bubbles/list`, which is page-oriented
@@ -306,8 +329,8 @@ does, over a real reader and temporary store. It covers:
 - Increments:
   1. The newer-than read (`6990119`).
   2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout
-     (implemented and reviewed; commit pending).
-  3. Launch and pull refresh with reconciliation.
+     (`c0b67a3`).
+  3. Launch and pull refresh with reconciliation (implemented and reviewed; commit pending).
   4. Seen: divider, resume placement, and saves.
 
 **Increment 1 (approved; contract in [`AGENTS.md`](AGENTS.md#timeline-reads)):** add `After` to

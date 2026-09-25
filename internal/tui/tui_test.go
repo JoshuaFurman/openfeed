@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/JoshuaFurman/openfeed/internal/config"
+	"github.com/JoshuaFurman/openfeed/internal/feed"
 	"github.com/JoshuaFurman/openfeed/internal/reader"
 	"github.com/JoshuaFurman/openfeed/internal/store"
 )
@@ -33,8 +36,47 @@ type post struct {
 	age              time.Duration
 }
 
-// seed caches posts for each named feed and returns a reader over them, plus the store for tests to break.
-func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *store.Store) {
+func feedURL(name string) string {
+	return "https://" + strings.ReplaceAll(name, " ", "-") + ".example/feed"
+}
+
+// fetcher serves refreshes. It stamps every fetch at now, before the real clock, so feeds are always due.
+type fetcher struct {
+	mu    sync.Mutex
+	posts map[string][]feed.Item
+	fails map[string]error
+	calls int
+}
+
+func (f *fetcher) Fetch(_ context.Context, url string, _ feed.Validators) (feed.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if err := f.fails[url]; err != nil {
+		return feed.Result{}, err
+	}
+	return feed.Result{Items: f.posts[url], FetchedAt: now}, nil
+}
+
+// serve sets what the next refreshes of a feed return.
+func (f *fetcher) serve(name string, items ...feed.Item) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.posts[feedURL(name)] = items
+}
+
+func (f *fetcher) fail(name string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails[feedURL(name)] = err
+}
+
+func fresh(key, title string, age time.Duration) feed.Item {
+	return feed.Item{Key: key, Title: title, URL: "https://fresh.example/" + key, PublishedAt: now.Add(-age)}
+}
+
+// seed caches posts for each named feed and returns a reader over them, with the fetcher its refreshes use.
+func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *fetcher) {
 	t.Helper()
 	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "openfeed.db"))
 	if err != nil {
@@ -44,10 +86,10 @@ func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *st
 	byFeed := map[string][]store.RefreshItem{}
 	var feeds []config.Feed
 	for _, name := range extraFeeds {
-		feeds = append(feeds, config.Feed{URL: "https://" + strings.ReplaceAll(name, " ", "-") + ".example/feed", Name: name})
+		feeds = append(feeds, config.Feed{URL: feedURL(name), Name: name})
 	}
 	for i, p := range posts {
-		url := "https://" + p.feed + ".example/feed"
+		url := feedURL(p.feed)
 		if byFeed[url] == nil {
 			feeds = append(feeds, config.Feed{URL: url, Name: p.feed})
 		}
@@ -64,7 +106,8 @@ func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *st
 			t.Fatal(err)
 		}
 	}
-	return reader.New(feeds, st, nil, nil), st
+	f := &fetcher{posts: map[string][]feed.Item{}, fails: map[string]error{}}
+	return reader.New(feeds, st, f, nil), f
 }
 
 // numbered makes n posts in one feed, a minute apart, newest first.
@@ -88,6 +131,33 @@ func (f *flaky) Timeline(ctx context.Context, query reader.Query) (reader.Page, 
 		return reader.Page{}, errors.New("read timeline: database is locked")
 	}
 	return f.Reader.Timeline(ctx, query)
+}
+
+// spanFlaky fails the first span reloads (reads bounded by Through) of the river it wraps.
+type spanFlaky struct {
+	*reader.Reader
+	failures int
+}
+
+func (f *spanFlaky) Timeline(ctx context.Context, query reader.Query) (reader.Page, error) {
+	if query.Through != nil && f.failures > 0 {
+		f.failures--
+		return reader.Page{}, errors.New("read timeline: database is locked")
+	}
+	return f.Reader.Timeline(ctx, query)
+}
+
+// slowRefresh refreshes until canceled, then takes a moment to wind down, as a round of fetches does.
+type slowRefresh struct {
+	*reader.Reader
+	finished atomic.Bool
+}
+
+func (s *slowRefresh) Refresh(ctx context.Context) (reader.Report, error) {
+	<-ctx.Done()
+	time.Sleep(20 * time.Millisecond)
+	s.finished.Store(true)
+	return reader.Report{}, ctx.Err()
 }
 
 func key(s string) tea.KeyPressMsg {
@@ -132,6 +202,21 @@ func send(t *testing.T, m *model, msg tea.Msg) bool {
 	return false
 }
 
+// advance moves the model's clock forward; ages move by minutes, so small steps leave the screen alone.
+func advance(m *model, d time.Duration) {
+	current := m.now()
+	m.now = func() time.Time { return current.Add(d) }
+}
+
+// pull double-taps k at the newest post, the refresh gesture.
+func pull(t *testing.T, m *model) {
+	t.Helper()
+	advance(m, time.Second)
+	press(t, m, "k")
+	advance(m, 150*time.Millisecond)
+	press(t, m, "k")
+}
+
 func press(t *testing.T, m *model, keys ...string) {
 	t.Helper()
 	for _, k := range keys {
@@ -141,16 +226,17 @@ func press(t *testing.T, m *model, keys ...string) {
 	}
 }
 
-// build makes a model without its minute tick, which would block these synchronous tests.
-func build(t *testing.T, river River, launch reader.Report, open func(string) error) *model {
-	m := newModel(t.Context(), river, launch, open, func() time.Time { return now })
-	m.tick = nil
+// build makes a model without timers, which would block these synchronous tests.
+func build(t *testing.T, river River, open func(string) error) *model {
+	m := newModel(t.Context(), river, open, func() time.Time { return now })
+	m.tick, m.animate, m.minSpin = nil, false, 0
 	return m
 }
 
-func start(t *testing.T, river River, launch reader.Report, width, height int, open func(string) error) *model {
+// start opens the river as a launch does, running the launch refresh and its reconciliation.
+func start(t *testing.T, river River, width, height int, open func(string) error) *model {
 	t.Helper()
-	m := build(t, river, launch, open)
+	m := build(t, river, open)
 	send(t, m, tea.WindowSizeMsg{Width: width, Height: height})
 	send(t, m, m.Init()())
 	return m
@@ -202,7 +288,7 @@ func TestRiverRendersNewestFirst(t *testing.T) {
 		{"alpha", "Last week", "https://alpha.example/2", 10 * 24 * time.Hour},
 		{"alpha", "Last year", "https://alpha.example/3", 400 * 24 * time.Hour},
 	})
-	m := start(t, river, reader.Report{}, 60, 8, noOpen(t))
+	m := start(t, river, 60, 8, noOpen(t))
 	lines := screen(m)
 	want := []string{
 		title + strings.Repeat(" ", 60-ansi.StringWidth(title)-ansi.StringWidth(hints)) + strings.TrimSpace(hints),
@@ -232,10 +318,11 @@ func TestRiverRendersNewestFirst(t *testing.T) {
 }
 
 func TestLinesFitTheTerminal(t *testing.T) {
-	river, _ := seed(t, []post{{"a-feed-with-a-very-long-configured-name", strings.Repeat("long title ", 20), "https://a.example/1", time.Hour}})
-	launch := reader.Report{Feeds: []reader.FeedResult{{Feed: config.Feed{Name: strings.Repeat("x", 100)}, Status: reader.Failing, Err: errors.New("down")}}}
+	long := strings.Repeat("x", 100)
+	river, fetch := seed(t, []post{{"a-feed-with-a-very-long-configured-name", strings.Repeat("long title ", 20), "https://a.example/1", time.Hour}}, long)
+	fetch.fail(long, errors.New("down"))
 	for _, width := range []int{12, 30, 50, 80} {
-		m := start(t, river, launch, width, 5, noOpen(t))
+		m := start(t, river, width, 5, noOpen(t))
 		for _, line := range screen(m) {
 			if w := ansi.StringWidth(line); w > width {
 				t.Errorf("width %d: line %q is %d cells", width, line, w)
@@ -252,7 +339,7 @@ func TestNameColumnIsSizedFromConfig(t *testing.T) {
 	}
 	posts = append(posts, post{"go-blog", "Go 1.27 is released", "https://go.example/1", 100 * time.Hour})
 	river, _ := seed(t, posts, "The Go Programming Blog")
-	m := start(t, river, reader.Report{}, 80, 12, noOpen(t))
+	m := start(t, river, 80, 12, noOpen(t))
 	column := strings.Index(selected(t, m), "post 0")
 	for range 55 {
 		press(t, m, "j")
@@ -267,13 +354,13 @@ func TestNameColumnIsSizedFromConfig(t *testing.T) {
 
 func TestNavigationLoadsOlderPages(t *testing.T) {
 	river, _ := seed(t, numbered(130))
-	m := start(t, river, reader.Report{}, 40, 12, noOpen(t))
+	m := start(t, river, 40, 12, noOpen(t))
 	if len(m.rows) != 50 || m.older == nil {
 		t.Fatalf("first page holds %d posts", len(m.rows))
 	}
-	press(t, m, "k") // Nothing above the newest post yet: pull-to-refresh arrives in increment 3.
-	if m.cursor != 0 {
-		t.Fatal("moved above the newest post")
+	pull(t, m) // Finds nothing new.
+	if m.cursor != 0 || len(m.rows) != 50 || m.refreshing {
+		t.Fatal("pulling without new posts moved the cursor or changed the window")
 	}
 	for range 45 {
 		press(t, m, "j")
@@ -303,7 +390,7 @@ func TestNavigationLoadsOlderPages(t *testing.T) {
 // resumeAt loads the window the way a resumed launch will: the nearest newer page, then everything below it.
 func resumeAt(t *testing.T, river *reader.Reader, width, height int, saved reader.Position) *model {
 	t.Helper()
-	m := start(t, river, reader.Report{}, width, height, noOpen(t))
+	m := start(t, river, width, height, noOpen(t))
 	above, err := river.Timeline(t.Context(), reader.Query{After: &saved})
 	if err != nil {
 		t.Fatal(err)
@@ -404,8 +491,9 @@ func TestPagesNeverDuplicatePosts(t *testing.T) {
 
 func TestLaunchReadFailureRetries(t *testing.T) {
 	inner, _ := seed(t, numbered(3))
-	river := &flaky{Reader: inner, failures: 2}
-	m := start(t, river, reader.Report{}, 60, 6, noOpen(t))
+	// The launch read and the reread after the launch refresh both fail, then one retry fails too.
+	river := &flaky{Reader: inner, failures: 3}
+	m := start(t, river, 60, 6, noOpen(t))
 	lines := screen(m)
 	if !strings.Contains(lines[1], "Could not read the river") || !strings.Contains(lines[5], "database is locked") {
 		t.Fatalf("launch failure screen:\n%s", strings.Join(lines, "\n"))
@@ -427,7 +515,7 @@ func TestOpenArticle(t *testing.T) {
 	})
 	var opened []string
 	failure := errors.New("no handler\x1b[2J")
-	m := start(t, river, reader.Report{}, 60, 6, func(url string) error {
+	m := start(t, river, 60, 6, func(url string) error {
 		opened = append(opened, url)
 		if len(opened) > 1 {
 			return failure
@@ -455,7 +543,7 @@ func TestOpenArticle(t *testing.T) {
 
 func TestResizeKeepsCursorVisible(t *testing.T) {
 	river, _ := seed(t, numbered(30))
-	m := start(t, river, reader.Report{}, 40, 20, noOpen(t))
+	m := start(t, river, 40, 20, noOpen(t))
 	for range 25 {
 		press(t, m, "j")
 	}
@@ -473,31 +561,35 @@ func TestResizeKeepsCursorVisible(t *testing.T) {
 
 func TestStatusAndEmptyStates(t *testing.T) {
 	empty, _ := seed(t, nil)
-	m := build(t, empty, reader.Report{}, noOpen(t))
+	m := build(t, empty, noOpen(t))
+	m.refreshing = true // As if the launch refresh were still running.
 	if !strings.Contains(strings.Join(screen(m), "\n"), "Loading…") {
 		t.Error("no loading state before the first page")
 	}
-	send(t, m, m.Init()())
-	if !strings.Contains(strings.Join(screen(m), "\n"), "No posts yet") {
+	if !strings.Contains(screen(m)[0], "refreshing") {
+		t.Error("the header does not show a running refresh")
+	}
+	send(t, m, m.loadHead()())
+	if !strings.Contains(strings.Join(screen(m), "\n"), "No posts yet. Refreshing…") {
+		t.Error("an empty river during a refresh does not say so")
+	}
+	m.refreshing = false
+	if !strings.Contains(strings.Join(screen(m), "\n"), "No posts yet. Press k twice to refresh.") {
 		t.Error("no empty state")
 	}
 
-	failing := func(names ...string) reader.Report {
-		var report reader.Report
-		for _, name := range names {
-			report.Feeds = append(report.Feeds, reader.FeedResult{Feed: config.Feed{Name: name}, Status: reader.Failing, Err: errors.New("HTTP 503")})
-		}
-		report.Feeds = append(report.Feeds, reader.FeedResult{Feed: config.Feed{Name: "fine"}, Status: reader.Refreshed})
-		return report
-	}
 	for _, tc := range []struct {
-		report reader.Report
-		want   string
+		failing []string
+		want    string
 	}{
-		{failing("lobsters"), "lobsters failed: HTTP 503"},
-		{failing("lobsters", "go blog"), "2 feeds failing: lobsters, go blog (details in the log)"},
+		{[]string{"lobsters"}, "lobsters failed: HTTP 503"},
+		{[]string{"lobsters", "go blog"}, "2 feeds failing: lobsters, go blog (details in the log)"},
 	} {
-		m := start(t, empty, tc.report, 80, 4, noOpen(t))
+		river, fetch := seed(t, nil, "lobsters", "go blog", "fine")
+		for _, name := range tc.failing {
+			fetch.fail(name, errors.New("HTTP 503"))
+		}
+		m := start(t, river, 80, 4, noOpen(t))
 		if status := screen(m)[3]; strings.TrimSpace(status) != tc.want {
 			t.Errorf("status = %q, want %q", status, tc.want)
 		}
@@ -509,7 +601,7 @@ func TestStatusAndEmptyStates(t *testing.T) {
 
 func TestPageErrorsShowInStatus(t *testing.T) {
 	river, _ := seed(t, numbered(130))
-	m := start(t, river, reader.Report{}, 40, 12, noOpen(t))
+	m := start(t, river, 40, 12, noOpen(t))
 	loaded := len(m.rows)
 	send(t, m, olderLoaded{err: errors.New("read timeline: disk I/O error"), window: m.window})
 	if m.loadingOlder || len(m.rows) != loaded || !strings.Contains(screen(m)[11], "disk I/O error") {
@@ -530,12 +622,12 @@ func TestPageErrorsShowInStatus(t *testing.T) {
 func TestSuspendQuitAndTick(t *testing.T) {
 	river, _ := seed(t, numbered(3))
 	for _, k := range []string{"q", "ctrl+c"} {
-		m := start(t, river, reader.Report{}, 40, 6, noOpen(t))
+		m := start(t, river, 40, 6, noOpen(t))
 		if !send(t, m, key(k)) {
 			t.Errorf("%s did not quit", k)
 		}
 	}
-	m := start(t, river, reader.Report{}, 40, 6, noOpen(t))
+	m := start(t, river, 40, 6, noOpen(t))
 	if _, cmd := m.Update(key("ctrl+z")); cmd == nil {
 		t.Error("ctrl+z did nothing")
 	} else if _, ok := cmd().(tea.SuspendMsg); !ok {
@@ -549,16 +641,16 @@ func TestSuspendQuitAndTick(t *testing.T) {
 	} else if _, ok := cmd().(ticked); !ok {
 		t.Error("the age tick rescheduled something else")
 	}
-	production := newModel(t.Context(), river, reader.Report{}, noOpen(t), time.Now)
-	if production.tick == nil {
-		t.Error("ages are never redrawn while idle")
+	production := newModel(t.Context(), river, noOpen(t), time.Now)
+	if production.tick == nil || !production.animate || production.minSpin != minSpin {
+		t.Error("production models do not redraw ages, animate the spinner, or hold it long enough")
 	}
 }
 
 func TestRunReturnsContextError(t *testing.T) {
 	river, _ := seed(t, numbered(3))
 	ctx, cancel := context.WithCancel(t.Context())
-	m := build(t, river, reader.Report{}, noOpen(t))
+	m := build(t, river, noOpen(t))
 	m.ctx = ctx
 	time.AfterFunc(50*time.Millisecond, cancel)
 	err := run(ctx, m, tea.WithInput(nil), tea.WithOutput(io.Discard))
@@ -578,5 +670,356 @@ func TestAge(t *testing.T) {
 		if got := age(now.Add(-tc.ago), now); got != tc.want {
 			t.Errorf("age(%s ago) = %q, want %q", tc.ago, got, tc.want)
 		}
+	}
+}
+
+func TestLaunchRefreshLandsNewPostsAboveTheCursor(t *testing.T) {
+	river, fetch := seed(t, numbered(20))
+	fetch.serve("alpha", fresh("new-1", "fresh one", 0), fresh("new-2", "fresh two", 0))
+	m := start(t, river, 60, 10, noOpen(t))
+	if got := rowTitles(m.rows[:3]); !slices.Equal(got, []string{"fresh two", "fresh one", "post 0"}) {
+		t.Fatalf("window starts %v", got)
+	}
+	// The cursor stays on the post it was on when the cached river showed; the new posts sit above it.
+	if !strings.Contains(selected(t, m), "post 0") || m.cursor != 2 || m.offset != 0 {
+		t.Errorf("cursor %d, offset %d, selected %q", m.cursor, m.offset, selected(t, m))
+	}
+	if fetch.calls != 1 || m.refreshing {
+		t.Errorf("launch refreshed %d times, still refreshing %v", fetch.calls, m.refreshing)
+	}
+}
+
+func TestPullToRefresh(t *testing.T) {
+	river, fetch := seed(t, numbered(20))
+	m := start(t, river, 60, 10, noOpen(t))
+	fetch.serve("alpha", fresh("new-1", "pulled", 0))
+	press(t, m, "j", "k")
+	if fetch.calls != 1 {
+		t.Fatal("moving up to the newest post refreshed")
+	}
+
+	advance(m, time.Second)
+	press(t, m, "k")
+	advance(m, 150*time.Millisecond)
+	_, cmd := m.Update(key("k")) // The second tap pulls.
+	if !m.refreshing || cmd == nil || !strings.Contains(screen(m)[0], "refreshing") {
+		t.Fatal("pulling did not start a visible refresh")
+	}
+	advance(m, 150*time.Millisecond)
+	m.Update(key("up"))
+	advance(m, 150*time.Millisecond)
+	if _, again := m.Update(key("up")); again != nil {
+		t.Error("a second pull started another refresh while one was running")
+	}
+	send(t, m, cmd())
+	if m.refreshing || fetch.calls != 2 || strings.Contains(screen(m)[0], "refreshing") {
+		t.Errorf("refresh did not finish: refreshing %v, %d fetches", m.refreshing, fetch.calls)
+	}
+	if m.rows[0].title != "pulled" || !strings.Contains(selected(t, m), "post 0") {
+		t.Errorf("pulled post is not above the cursor: %v, selected %q", rowTitles(m.rows[:2]), selected(t, m))
+	}
+
+	// Below the head, the top of the window loads newer posts instead of refreshing.
+	all, err := river.Timeline(t.Context(), reader.Query{Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	below := resumeAt(t, river, 60, 10, all.Items[5].Position)
+	calls := fetch.calls
+	below.newer = &all.Items[0].Position // Pretend newer posts remain above the window.
+	below.cursor, below.loadingNewer = 0, true
+	if _, cmd := below.Update(key("k")); cmd != nil || below.refreshing || fetch.calls != calls {
+		t.Error("pulling below the head refreshed")
+	}
+	// A refresh that finishes below the head leaves new posts waiting above the window.
+	window := rowTitles(below.rows)
+	if _, cmd := below.Update(refreshed{}); cmd != nil || !slices.Equal(rowTitles(below.rows), window) || below.newer == nil {
+		t.Error("a refresh below the head reloaded the window")
+	}
+}
+
+func TestRefreshReconcilesTheSpan(t *testing.T) {
+	river, fetch := seed(t, numbered(20))
+	m := start(t, river, 60, 12, noOpen(t))
+	for range 5 {
+		press(t, m, "j")
+	}
+	if !strings.Contains(selected(t, m), "post 5") {
+		t.Fatalf("selected %q", selected(t, m))
+	}
+	// Post 5 (key id:5) is corrected to be newer, a late discovery lands inside the span, and post 2 moves older.
+	fetch.serve("alpha",
+		fresh("id:5", "post 5", 30*time.Second),
+		fresh("late", "late discovery", 150*time.Second),
+		fresh("id:2", "post 2", 17*time.Minute),
+	)
+	for m.cursor > 0 {
+		press(t, m, "k")
+	}
+	pull(t, m)
+	want := []string{"post 5", "post 0", "post 1", "late discovery", "post 3", "post 4", "post 6"}
+	if got := rowTitles(m.rows[:7]); !slices.Equal(got, want) {
+		t.Fatalf("reconciled window = %v, want %v", got, want)
+	}
+	if !strings.Contains(selected(t, m), "post 0") {
+		t.Errorf("cursor left its post: %q", selected(t, m))
+	}
+	if i := slices.Index(rowTitles(m.rows), "post 2"); i != 17 {
+		t.Errorf("corrected post 2 is at %d, want between post 15 and post 16", i)
+	}
+	if len(m.rows) != 21 {
+		t.Errorf("window holds %d posts, want every post once", len(m.rows))
+	}
+}
+
+func TestRefreshMovesTheCursorWhenItsPostLeaves(t *testing.T) {
+	river, fetch := seed(t, numbered(60))
+	m := start(t, river, 60, 12, noOpen(t))
+	for range 10 {
+		press(t, m, "j")
+	}
+	if !strings.Contains(selected(t, m), "post 10") {
+		t.Fatalf("selected %q", selected(t, m))
+	}
+	// The selected post is corrected to far older than the loaded span, so the reload no longer holds it.
+	fetch.serve("alpha", fresh("id:10", "post 10", 1000*time.Hour))
+	send(t, m, m.refresh()())
+	if !strings.Contains(selected(t, m), "post 11") || slices.Contains(rowTitles(m.rows), "post 10") {
+		t.Errorf("cursor should move to the nearest older post, selected %q", selected(t, m))
+	}
+}
+
+func TestReloadKeepsRowsLoadedMeanwhile(t *testing.T) {
+	river, _ := seed(t, numbered(130))
+	m := start(t, river, 60, 12, noOpen(t))
+	reload := m.reload()() // Requested for the first 50 posts.
+	for range 45 {
+		press(t, m, "j") // Meanwhile the user scrolls past them and an older page loads.
+	}
+	if len(m.rows) != 100 {
+		t.Fatalf("%d posts loaded", len(m.rows))
+	}
+	send(t, m, reload)
+	if len(m.rows) != 100 || !strings.Contains(selected(t, m), "post 45") {
+		t.Errorf("reload dropped rows loaded meanwhile: %d posts, selected %q", len(m.rows), selected(t, m))
+	}
+}
+
+func TestRefreshUpdatesFailureStatus(t *testing.T) {
+	river, fetch := seed(t, numbered(3))
+	fetch.fail("alpha", errors.New("HTTP 503"))
+	m := start(t, river, 60, 6, noOpen(t))
+	if status := strings.TrimSpace(screen(m)[5]); status != "alpha failed: HTTP 503" {
+		t.Fatalf("status = %q", status)
+	}
+	fetch.fail("alpha", nil)
+	send(t, m, refreshed{report: reader.Report{Feeds: []reader.FeedResult{{Feed: config.Feed{Name: "alpha"}, Status: reader.Refreshed}}}})
+	if status := strings.TrimSpace(screen(m)[5]); status != "" {
+		t.Errorf("a recovered feed still shows as failing: %q", status)
+	}
+	send(t, m, refreshed{err: context.Canceled})
+	if m.refreshing {
+		t.Error("a canceled refresh left the spinner running")
+	}
+}
+
+func TestEmptyRiverFillsAfterRefresh(t *testing.T) {
+	river, fetch := seed(t, nil, "alpha")
+	fetch.serve("alpha", fresh("first", "first post", time.Minute))
+	m := start(t, river, 60, 6, noOpen(t))
+	if len(m.rows) != 1 || !strings.Contains(selected(t, m), "first post") {
+		t.Errorf("launch refresh did not fill an empty river: %v", rowTitles(m.rows))
+	}
+}
+
+func TestStaleHeadReadsAreDropped(t *testing.T) {
+	river, _ := seed(t, numbered(3))
+	m := build(t, river, noOpen(t))
+	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 6})
+	first := m.loadHead()()
+	second := m.loadHead()()
+	send(t, m, second)
+	m.cursor = 2
+	send(t, m, first)
+	if m.cursor != 2 {
+		t.Error("a superseded head read replaced the window")
+	}
+}
+
+func TestSpinnerRunsOnlyWhileRefreshing(t *testing.T) {
+	river, _ := seed(t, numbered(3))
+	m := start(t, river, 60, 6, noOpen(t))
+	tick := m.spinner.Tick()
+	if _, cmd := m.Update(tick); cmd != nil {
+		t.Error("the spinner kept ticking after the refresh")
+	}
+	m.refreshing = true
+	if _, cmd := m.Update(tick); cmd == nil {
+		t.Error("the spinner stopped during a refresh")
+	}
+
+	m.refreshing, m.minSpin = false, 80*time.Millisecond
+	advance(m, time.Second)
+	press(t, m, "k")
+	advance(m, 150*time.Millisecond)
+	started := time.Now()
+	send(t, m, key("k"))
+	if elapsed := time.Since(started); elapsed < m.minSpin {
+		t.Errorf("an instant refresh showed for %s, want at least %s", elapsed, m.minSpin)
+	}
+}
+
+func TestFailedReloadRetriesOnTheNextMove(t *testing.T) {
+	inner, fetch := seed(t, numbered(20))
+	fetch.serve("alpha", fresh("new", "fresh post", 0))
+	river := &spanFlaky{Reader: inner, failures: 1}
+	m := start(t, river, 60, 10, noOpen(t))
+	if m.rows[0].title == "fresh post" || !m.reloadFailed || !strings.Contains(screen(m)[9], "database is locked") {
+		t.Fatalf("the launch reload did not fail visibly: %v", rowTitles(m.rows[:2]))
+	}
+	press(t, m, "j")
+	if m.reloadFailed || m.rows[0].title != "fresh post" {
+		t.Errorf("moving did not retry the reload: %v", rowTitles(m.rows[:2]))
+	}
+}
+
+func TestRefreshDuringReloadReloadsAgain(t *testing.T) {
+	river, fetch := seed(t, numbered(20))
+	m := start(t, river, 60, 10, noOpen(t))
+	first := m.reload()() // In flight when the next refresh finishes.
+	fetch.serve("alpha", fresh("new", "saved by the second refresh", 0))
+	if _, err := river.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, cmd := m.Update(refreshed{}); cmd != nil {
+		t.Fatal("a second reload ran alongside the first")
+	}
+	send(t, m, first)
+	if m.rows[0].title != "saved by the second refresh" || m.reloading {
+		t.Errorf("the second refresh's posts never loaded: %v", rowTitles(m.rows[:2]))
+	}
+}
+
+func TestRowsLoadedDuringAReloadAreReread(t *testing.T) {
+	river, fetch := seed(t, numbered(130))
+	m := start(t, river, 60, 12, noOpen(t))
+	reload := m.reload()() // Covers the first 50 posts.
+	for range 45 {
+		press(t, m, "j") // Meanwhile an older page loads posts 50–99.
+	}
+	// A refresh backfills a post among those older rows before the reload lands.
+	fetch.serve("alpha", fresh("backfill", "backfilled", 70*time.Minute+30*time.Second))
+	if _, err := river.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	send(t, m, reload)
+	if !slices.Contains(rowTitles(m.rows), "backfilled") || len(m.rows) != 101 || !strings.Contains(selected(t, m), "post 45") {
+		t.Errorf("rows loaded during the reload were not reread: %d posts, selected %q", len(m.rows), selected(t, m))
+	}
+}
+
+func TestRefreshDuringAHeadReadReissuesIt(t *testing.T) {
+	river, fetch := seed(t, numbered(130))
+	all, err := river.Timeline(t.Context(), reader.Query{Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := resumeAt(t, river, 60, 12, all.Items[100].Position)
+	_, cmd := m.Update(key("g"))
+	stale := cmd() // Read before the refresh below saves.
+	fetch.serve("alpha", fresh("new", "saved during g", 0))
+	if _, err := river.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	send(t, m, refreshed{})
+	send(t, m, stale)
+	if m.rows[0].title != "saved during g" || m.headPending {
+		t.Errorf("the head read from before the refresh won: %v", rowTitles(m.rows[:2]))
+	}
+}
+
+func TestQuitWaitsForWorkBeforeReturning(t *testing.T) {
+	inner, _ := seed(t, numbered(3))
+	river := &slowRefresh{Reader: inner}
+	ctx, cancel := context.WithCancel(t.Context())
+	m := newModel(ctx, river, noOpen(t), func() time.Time { return now })
+	m.tick, m.animate = nil, false
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if err := run(ctx, m, tea.WithInput(nil), tea.WithOutput(io.Discard)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run returned %v", err)
+	}
+	if !river.finished.Load() {
+		t.Error("run returned while the refresh was still using the river")
+	}
+	called := false
+	if msg := m.work(func() tea.Msg { called = true; return nil })(); msg != nil || called {
+		t.Error("a command started after the program finished still used the river")
+	}
+}
+
+func TestDoubleTapToRefresh(t *testing.T) {
+	river, fetch := seed(t, numbered(20))
+	tap := func(m *model, after time.Duration, msg tea.KeyPressMsg) {
+		advance(m, after)
+		send(t, m, msg)
+	}
+	repeat := tea.KeyPressMsg{Code: 'k', Text: "k", IsRepeat: true}
+	for _, tc := range []struct {
+		name    string
+		taps    func(m *model)
+		refresh bool
+	}{
+		{"single tap", func(m *model) { tap(m, time.Second, key("k")) }, false},
+		{"double tap", func(m *model) { tap(m, time.Second, key("k")); tap(m, 150*time.Millisecond, key("k")) }, true},
+		{"arrow double tap", func(m *model) { tap(m, time.Second, key("up")); tap(m, 300*time.Millisecond, key("up")) }, true},
+		{"taps too far apart", func(m *model) { tap(m, time.Second, key("k")); tap(m, 500*time.Millisecond, key("k")) }, false},
+		{"another key between taps", func(m *model) {
+			tap(m, time.Second, key("k"))
+			tap(m, 100*time.Millisecond, key("o"))
+			tap(m, 100*time.Millisecond, key("k"))
+		}, false},
+		{"flagged autorepeat", func(m *model) {
+			for range 20 {
+				tap(m, 150*time.Millisecond, repeat)
+			}
+		}, false},
+		{"unflagged autorepeat", func(m *model) {
+			for range 20 {
+				tap(m, 30*time.Millisecond, key("k"))
+			}
+		}, false},
+		{"single tap after holding", func(m *model) {
+			for range 20 {
+				tap(m, 30*time.Millisecond, key("k"))
+			}
+			tap(m, 200*time.Millisecond, key("k"))
+		}, false},
+		{"double tap after holding", func(m *model) {
+			for range 20 {
+				tap(m, 30*time.Millisecond, key("k"))
+			}
+			tap(m, 200*time.Millisecond, key("k"))
+			tap(m, 150*time.Millisecond, key("k"))
+		}, true},
+		{"arriving at the top is not a tap", func(m *model) {
+			tap(m, time.Second, key("j"))
+			tap(m, time.Second, key("k"))
+			tap(m, 150*time.Millisecond, key("k"))
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := start(t, river, 60, 8, func(string) error { return nil })
+			calls := fetch.calls
+			tc.taps(m)
+			if refreshed := fetch.calls > calls; refreshed != tc.refresh {
+				t.Errorf("refreshed = %v, want %v", refreshed, tc.refresh)
+			}
+		})
+	}
+
+	m := start(t, river, 60, 8, noOpen(t))
+	tap(m, time.Second, key("k"))
+	if status := strings.TrimSpace(screen(m)[7]); status != "Press again to refresh." {
+		t.Errorf("the first tap did not explain the gesture: %q", status)
 	}
 }

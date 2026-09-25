@@ -17,15 +17,17 @@ import (
 type River interface {
 	Feeds() []config.Feed
 	Timeline(ctx context.Context, query reader.Query) (reader.Page, error)
+	Refresh(ctx context.Context) (reader.Report, error)
 }
 
-// Run shows the river until the user quits or ctx ends; launch reports the refresh before it opened.
+// Run shows the river until the user quits or ctx ends, refreshing at launch and on pull.
 // Signals are the caller's to handle: cancel ctx to stop, and Run returns ctx's error.
-func Run(ctx context.Context, river River, launch reader.Report) error {
-	return run(ctx, newModel(ctx, river, launch, openBrowser, time.Now))
+func Run(ctx context.Context, river River) error {
+	return run(ctx, newModel(ctx, river, openBrowser, time.Now))
 }
 
 func run(ctx context.Context, m *model, options ...tea.ProgramOption) error {
+	defer m.finish()
 	options = append([]tea.ProgramOption{tea.WithContext(ctx), tea.WithoutSignalHandler()}, options...)
 	_, err := tea.NewProgram(m, options...).Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {

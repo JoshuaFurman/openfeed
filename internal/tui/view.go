@@ -32,8 +32,10 @@ func (m *model) View() tea.View {
 		lines = append(lines, fit(" Loading…", m.width))
 	case m.headFailed:
 		lines = append(lines, fit(" Could not read the river. Press g to retry.", m.width))
+	case len(m.rows) == 0 && m.refreshing:
+		lines = append(lines, fit(" No posts yet. Refreshing…", m.width))
 	case len(m.rows) == 0:
-		lines = append(lines, fit(" No posts yet. Posts appear here after your feeds refresh.", m.width))
+		lines = append(lines, fit(" No posts yet. Press k twice to refresh.", m.width))
 	}
 	body := m.visible() // A state message above takes one of these lines.
 	if m.chrome() {
@@ -54,13 +56,17 @@ func (m *model) View() tea.View {
 	return view
 }
 
-// header shows the title with the key hints right-aligned when they fit.
+// header shows the title, the spinner while refreshing, and the key hints right-aligned when they fit.
 func (m *model) header() string {
-	gap := m.width - ansi.StringWidth(title) - ansi.StringWidth(hints)
-	if gap < 2 {
-		return headerStyle.Render(fit(title, m.width))
+	left := headerStyle.Render(title)
+	if m.refreshing {
+		left += " " + m.spinner.View() + dimStyle.Render(" refreshing")
 	}
-	return headerStyle.Render(title) + strings.Repeat(" ", gap) + dimStyle.Render(hints)
+	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(hints)
+	if gap < 2 {
+		return fit(left, m.width)
+	}
+	return left + strings.Repeat(" ", gap) + dimStyle.Render(hints)
 }
 
 func (m *model) row(i int) string {

@@ -50,20 +50,26 @@ func offline(t *testing.T) *http.Client {
 }
 
 func never(t *testing.T) present {
-	return func(context.Context, tui.River, reader.Report) error {
+	return func(context.Context, tui.River) error {
 		t.Error("the river was presented")
 		return nil
 	}
 }
 
-// presented is what run handed to the TUI: the launch report and the whole river, labeled.
+// presented is what the TUI would see: a refresh report and the whole river, labeled.
 type presented struct {
 	statuses []reader.Status
 	river    []string
 }
 
+// capture exercises the river run hands to the TUI: a refresh through the configured client, then a read.
+// The TUI's own launch refresh is covered by the tui tests; these check run's wiring.
 func capture(t *testing.T, into *presented) present {
-	return func(ctx context.Context, river tui.River, launch reader.Report) error {
+	return func(ctx context.Context, river tui.River) error {
+		launch, err := river.Refresh(ctx)
+		if err != nil {
+			return err
+		}
 		for _, result := range launch.Feeds {
 			into.statuses = append(into.statuses, result.Status)
 		}
@@ -100,7 +106,7 @@ func TestRunFirstLaunch(t *testing.T) {
 	}
 }
 
-func TestRunRefreshesThenPresentsRiver(t *testing.T) {
+func TestRunWiresClientStoreAndLog(t *testing.T) {
 	configPath, logPath := isolate(t)
 	writeConfig(t, configPath, `
 [[feed]]
@@ -128,8 +134,8 @@ name = "broken"
 	if err := run(t.Context(), &out, client, capture(t, &first)); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "Refreshing 2 feeds…\n" {
-		t.Errorf("output = %q", out.String())
+	if out.Len() != 0 {
+		t.Errorf("run printed %q before the TUI", out.String())
 	}
 	if !slices.Equal(first.statuses, []reader.Status{reader.Refreshed, reader.Failing}) {
 		t.Errorf("launch statuses = %v", first.statuses)
@@ -151,7 +157,7 @@ name = "broken"
 	}
 }
 
-func TestRunCanceledDuringRefresh(t *testing.T) {
+func TestRunReturnsCancellationAndLeavesTheStoreReopenable(t *testing.T) {
 	configPath, _ := isolate(t)
 	writeConfig(t, configPath, "[[feed]]\nurl = \"https://slow.example/feed\"\n")
 	ctx, cancel := context.WithCancel(t.Context())
@@ -161,7 +167,8 @@ func TestRunCanceledDuringRefresh(t *testing.T) {
 		return nil, req.Context().Err()
 	})}
 	var out bytes.Buffer
-	if err := run(ctx, &out, client, never(t)); !errors.Is(err, context.Canceled) {
+	var canceled presented
+	if err := run(ctx, &out, client, capture(t, &canceled)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled run returned %v", err)
 	}
 	unavailable := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
@@ -181,7 +188,7 @@ func TestRunReturnsPresenterErrors(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 	})}
 	failure := errors.New("terminal lost")
-	err := run(t.Context(), io.Discard, unavailable, func(context.Context, tui.River, reader.Report) error { return failure })
+	err := run(t.Context(), io.Discard, unavailable, func(context.Context, tui.River) error { return failure })
 	if !errors.Is(err, failure) {
 		t.Errorf("run returned %v, want the presenter's error", err)
 	}

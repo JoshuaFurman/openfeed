@@ -6,8 +6,8 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> `openfeed` refreshes your subscriptions and opens the river in your terminal. Refreshing while it is
-> open and resuming where you left off are in progress.
+> `openfeed` opens the river in your terminal and refreshes it in the background. Resuming where you
+> left off is in progress.
 > [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
@@ -67,14 +67,18 @@ tags = ["tech"]          # optional
 A malformed subscription fails startup with the offending block named. That is deliberate:
 silently skipping a bad entry would unsubscribe you from a feed you believe you are reading.
 
-At launch, openfeed fetches every subscription concurrently (at most two requests at a time per
-website), then opens the river, newest first. A feed fetched in the last 30 seconds is not fetched
-again. A failing feed never hides posts that are already cached; the status line names it, and the
-log has the details.
+openfeed opens straight to the cached river, newest first, and refreshes every subscription in the
+background (at most two requests at a time per website). New posts appear above your cursor, which
+stays on the post you were reading. To refresh again, double-tap `k` (or ↑) at the newest post; a
+single press or a held key never refreshes. A feed fetched in
+the last 30 seconds is not fetched again, but the pull still shows its spinner. A failing feed never
+hides posts that are already cached; the status line says why it failed, and the log has the
+details.
 
 | Key | Action |
 |---|---|
 | `j` / `k` or ↓ / ↑ | Move through the river; older posts load as you scroll |
+| `k` `k` (or ↑ ↑) at the newest post | Refresh |
 | `g` or Home | Jump to the newest post |
 | `o` or Enter | Open the post's article in your browser |
 | `q` or Ctrl-C | Quit |
