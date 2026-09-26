@@ -10,60 +10,63 @@ work status and sequencing. Proposals here are not settled decisions until recor
   persistence, chronological-range timeline queries across selected active subscriptions, the
   saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), reader
   orchestration (`bf4e163`), command wiring (`56309c5`), newer-than timeline reads (`6990119`), and
-  the TUI river (`c0b67a3`).
+  the TUI river (`c0b67a3`), and refresh inside the TUI with a double-tap pull (`ee8f22f`).
   Settled decisions and contracts are in `AGENTS.md`.
-- **Current behavior:** `openfeed` loads config and opens the TUI river at the newest cached post. It
-  refreshes in the background at launch and when the user pulls past the newest post; a spinner shows
-  meanwhile. New posts land above the cursor, and failing feeds show in the status line. With no
-  subscriptions it prints where to add one. Signals exit 130/143 quietly. There is no seen divider or
-  resume placement yet (increment 4).
-- **Last review (TUI increment 3, before commit):** 10 findings, all verified.
+- **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
+  "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
+  a double-tap of `k`/↑ at the newest post, and saves the furthest reached position: after 2s idle,
+  after refreshes, and at exit. First launch opens at the newest post. Signals exit 130/143 quietly and
+  still save.
+- **Last review (TUI increment 4, before commit):** 9 findings, all verified.
   - **Fixed, each with a test that fails without it:**
-    - a failed reload after a refresh was never retried (the next move now retries it);
-    - quitting mid-refresh returned while the refresh still used the store that `main` then closed
-      (quitting now cancels and waits);
-    - rows loaded during a reload were kept stale (now reread);
-    - concurrent reloads could drop the newer one (now one at a time, plus one more);
-    - a refresh during a pending head read was lost (the read is reissued);
-    - the empty state offered a pull during a running refresh.
-  - **Also fixed:** `go.mod` listed Bubbles as indirect (`go mod tidy`; tidiness is now a gate), the
-    dependency table, and `cmd` test names, which now say they check wiring. The TUI tests own the
-    launch refresh.
-  - **Deferred:** every refresh rereads and rebuilds the whole loaded span. The cost is bounded by the
-    window; measure before optimizing (for example, by skipping content in span reads).
+    - a `g` jump superseded by a refresh's reread, or retried after a failure, became a plain
+      newest-posts read and never saved the skip. Pending reads now remember their kind
+      (`pendingRead` replaces the `resuming` flag and two redundant message fields);
+    - a resume read arriving before the terminal size lost the lower-third placement;
+    - a line was set aside for a divider that was not loaded;
+    - `o` reached a post even when the article failed to open;
+    - each move scheduled two save timers.
+  - **Also fixed:** the exit save and shutdown are deferred again, so a panic cannot skip them.
+  - **Rejected:** the two resume reads not being a snapshot. The refresh's reread through the window's
+    bottom already brings in anything committed between them, and a failed reread retries on the next
+    move.
 
-  Earlier: TUI increment 2 was reviewed before `c0b67a3`, and TUI increment 1 before `6990119`.
-  Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** the user commits TUI increment 3. Then increment 4: the "You left off here"
-  divider, resume placement (the `After`-then-`Before` launch reads), and seen saving (`Reached` on
-  navigation, `g` and `o`; `SaveSeen` on a 2s debounce, after refreshes, and at exit).
-- **Implementation in progress:** TUI increment 3 is implemented, reviewed, fixed, and verified, but
+  Earlier: TUI increment 3 was reviewed before `ee8f22f`; its double-tap change was not separately
+  reviewed. Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
+- **Next action:** the user commits TUI increment 4. Then the remaining v0.1 work:
+  - the retention/removed-subscriptions policy (an open question below);
+  - an end-to-end check of first-run and cached/offline reading, with user-facing instructions;
+  - v0.1 acceptance.
+- **Implementation in progress:** TUI increment 4 is implemented, reviewed, fixed, and verified, but
   not yet committed. It covers:
-  - launch refresh and double-tap pull refresh inside the TUI, with the Bubbles spinner (at least
-    600ms). A held key's autorepeat never pulls;
-  - span reconciliation that keeps rows loaded meanwhile and the cursor on its post;
-  - numbered head reads, and refresh-driven failure status;
-  - `tui.Run(ctx, river)`;
-  - the blocking pre-TUI refresh removed from `cmd/openfeed`.
+  - the resume read (saved position, then `After`, then `Before`), used for rereads until the first
+    window arrives;
+  - the divider, drawn only among loaded posts and giving way on short terminals;
+  - `Reached` on navigation (the post left and the post landed on), `g`, and `o`;
+  - `SaveSeen` after 2s idle (only the latest navigation's timer), after refreshes, and at exit under a
+    detached 5s deadline.
 
-- **Last verification (increment 3, after review fixes):** every gate passed:
+- **Last verification (increment 4):** every gate passed:
   - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
-  - `go mod verify`, and `go mod tidy -diff`, now a gate;
-  - `git diff --check`, and a scan for literal format characters in Go sources.
+  - `go mod verify` and `go mod tidy -diff`;
+  - `git diff --check`, and the format-character scan.
 
-  TUI coverage is 93.9%, and TUI tests passed 25 race-detector runs. Deliberately breaking each
-  refresh rule and each review fix made a test fail.
+  After the review fixes, TUI coverage is 94.2%, TUI tests passed 25 race-detector runs, and undoing
+  each fix made a test fail. One test needed rethinking first: a reserved line only shows as early
+  scrolling. Deliberately breaking each seen rule made a test fail:
+  - launch reaching;
+  - only the landed post reaching;
+  - stale idle timers saving;
+  - refresh or exit not saving;
+  - `g` or `o` not reaching;
+  - launching at the newest;
+  - a divider beside unloaded posts;
+  - a divider pushing the cursor off screen.
 
-  In a real pseudo-terminal:
-  - with an empty database, the binary showed "No posts yet. Refreshing…" and the spinner, filled the
-    river, showed "dead failed: <reason>", and quit (exit 0);
-  - pressing `q` while a fetch was stuck on an unreachable host exited in 2.1s (exit 0), with an
-    empty log: no work outlived the store;
-  - after the switch to double-tap, a `kkkkkk` burst (like a held key) did not refresh, while `k`,
-    150ms, `k` showed "Press again to refresh." and then the spinner (both exit 0). TUI coverage is
-    94.2%, TUI tests passed 25 race-detector runs, and undoing each double-tap rule made a test fail.
-
-  The binary cross-builds for Linux/amd64 and Windows/amd64.
+  One test needed a taller terminal before it caught its break. In a real pseudo-terminal, a first
+  launch drew no divider, moved with `j`, and quit (exit 0). The saved position was then exactly the
+  newest post, and the relaunch drew "You left off here" (exit 0). The binary cross-builds for
+  Linux/amd64 and Windows/amd64.
 
 ### Keeping this useful
 
@@ -262,8 +265,8 @@ The article operation remains deferred until there is a reader pane.
   silent head/history gaps or duplicate visible identities; implement the agreed position-preserving
   refresh behavior and settle anchor-movement edge cases before implementation.
 - [x] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
-- [ ] Show the seen divider and persist the agreed position as the user reads/exits.
-- [ ] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
+- [x] Show the seen divider and persist the agreed position as the user reads/exits.
+- [x] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
 - [ ] Verify first-run and cached/offline reading end to end; update user-facing instructions.
 
 TUI requirements already settled:
@@ -289,6 +292,19 @@ does, over a real reader and temporary store. It covers:
 - quit, suspend, the minute tick, context cancellation through `run`, and `age`.
 
 `text_test.go` covers `Sanitize`.
+
+**TUI acceptance coverage (increment 4):** a `counting` river records `Reached` calls. Tests cover:
+- resuming with the divider between post 99 and the resumed post, in the lower part of the screen;
+- resume edges: no saved position, saved at the newest post, and nothing at or below;
+- reading upward saving the furthest post, with only the latest idle timer saving and reading older
+  never moving it back;
+- the first launch saving the head on the first move;
+- `g` and `o` reaching their post, and refresh saving without reaching;
+- the exit save after a signal;
+- the divider drawn only where it falls, never beside unloaded posts, and giving way at short heights;
+- a launch refresh that finishes before the first window still resuming;
+- after review: jumps surviving a supersede and a retry, placement waiting for the terminal size, no
+  line reserved for an unloaded divider, failed opens not reaching, and one save timer per move.
 
 **TUI acceptance coverage (increment 3):** a fake fetcher drives real refreshes through the reader and
 store. Tests cover:
@@ -330,8 +346,8 @@ store. Tests cover:
   1. The newer-than read (`6990119`).
   2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout
      (`c0b67a3`).
-  3. Launch and pull refresh with reconciliation (implemented and reviewed; commit pending).
-  4. Seen: divider, resume placement, and saves.
+  3. Launch and pull refresh with reconciliation (`ee8f22f`).
+  4. Seen: divider, resume placement, and saves (implemented and reviewed; commit pending).
 
 **Increment 1 (approved; contract in [`AGENTS.md`](AGENTS.md#timeline-reads)):** add `After` to
 `TimelineQuery` and `reader.Query`. It selects the posts nearest above it (strictly newer, nearest

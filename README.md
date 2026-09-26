@@ -6,8 +6,7 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
 > **Status: early. Not yet usable as a reader.**
-> `openfeed` opens the river in your terminal and refreshes it in the background. Resuming where you
-> left off is in progress.
+> `openfeed` opens the river in your terminal where you left off, and refreshes it in the background.
 > [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
 
 ## Why
@@ -67,8 +66,12 @@ tags = ["tech"]          # optional
 A malformed subscription fails startup with the offending block named. That is deliberate:
 silently skipping a bad entry would unsubscribe you from a feed you believe you are reading.
 
-openfeed opens straight to the cached river, newest first, and refreshes every subscription in the
-background (at most two requests at a time per website). New posts appear above your cursor, which
+openfeed opens straight to the cached river where you left off: your last post sits just below a
+"── You left off here ──" line, with newer posts above it. Read upward with `k` toward the newest post,
+or press `g` to skip straight there. Your place is saved as you move (after a two-second pause, after
+each refresh, and when you quit), so it survives restarts. The first time, the river opens at the
+newest post, and everything already cached counts as history. Meanwhile, openfeed refreshes every
+subscription in the background (at most two requests at a time per website). New posts appear above your cursor, which
 stays on the post you were reading. To refresh again, double-tap `k` (or ↑) at the newest post; a
 single press or a held key never refreshes. A feed fetched in
 the last 30 seconds is not fetched again, but the pull still shows its spinner. A failing feed never

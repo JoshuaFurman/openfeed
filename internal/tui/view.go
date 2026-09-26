@@ -41,8 +41,14 @@ func (m *model) View() tea.View {
 	if m.chrome() {
 		body++ // Below the header.
 	}
-	for i := m.offset; i < len(m.rows) && len(lines) < body; i++ {
-		lines = append(lines, m.row(i))
+	for i := m.offset; i <= len(m.rows) && len(lines) < body; i++ {
+		// The divider gives way when drawing it would push the cursor's row off screen.
+		if m.dividerBefore(i) && (i > m.cursor || body-len(lines)-1 >= m.cursor-i+1) {
+			lines = append(lines, m.dividerLine())
+		}
+		if i < len(m.rows) && len(lines) < body {
+			lines = append(lines, m.row(i))
+		}
 	}
 	for len(lines) < body {
 		lines = append(lines, "")
@@ -54,6 +60,27 @@ func (m *model) View() tea.View {
 	view := tea.NewView(strings.Join(lines, "\n"))
 	view.AltScreen = true
 	return view
+}
+
+// dividerBefore reports whether the saved position falls directly above row i, where i past the last row
+// means below it. Where it falls among posts not loaded yet, it is not drawn.
+func (m *model) dividerBefore(i int) bool {
+	if m.divider == nil || len(m.rows) == 0 {
+		return false
+	}
+	newerAbove := i > 0 && m.rows[i-1].position.Compare(*m.divider) > 0
+	if i == 0 {
+		newerAbove = m.newer == nil // Nothing newer exists above the first row.
+	}
+	if i == len(m.rows) {
+		return newerAbove && m.older == nil
+	}
+	return newerAbove && m.rows[i].position.Compare(*m.divider) <= 0
+}
+
+func (m *model) dividerLine() string {
+	label := "── You left off here "
+	return dimStyle.Render(fit(label+strings.Repeat("─", max(m.width-ansi.StringWidth(label), 0)), m.width))
 }
 
 // header shows the title, the spinner while refreshing, and the key hints right-aligned when they fit.

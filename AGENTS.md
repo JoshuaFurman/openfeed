@@ -220,9 +220,20 @@ waiting above it, and changes inside it are reconciled at the next head reload. 
 commands still using the river and waits for them, because Bubble Tea does not, so the caller can
 close the store safely.
 
-Every navigation reaches both the post left and the post landed on, and `g` and `o` reach their post.
-Launch placement and refreshes never do. `SaveSeen` runs after 2s idle, after each refresh, and at
-exit. Keys: `j`/`k` or the arrows move, `g` or Home jumps to the newest, `o` or Enter opens the article
+Launch reads the saved position once, as the session's divider, and then resumes there. A window read
+that is superseded (by the reload after a refresh) or retried (after a failure) reruns the same kind of
+read: the launch resume, `g`'s jump, or the newest posts. So a resume still resumes and a jump still
+reaches the newest post. The resumed post starts in the lower third of the screen, so newer posts show
+above it; if the window arrives before the terminal size, the size applies that placement. The divider
+is drawn only where it falls among loaded posts: above the newest post when nothing newer exists, and
+below the last when nothing older remains. While it is loaded, it takes a screen line, which scrolling
+sets aside. It gives way when a terminal is too short to show both it and the cursor's row.
+
+Every navigation reaches both the post left and the post landed on, scheduling one save, and `g`
+reaches the newest post once it loads. `o` reaches its post only when the article opens. Launch
+placement and refreshes never reach. `SaveSeen` runs after 2s without another navigation, after
+each refresh, and at exit. The exit save runs after the program's commands have stopped, under its own
+5s deadline, so it still happens when a signal ended the program. Keys: `j`/`k` or the arrows move, `g` or Home jumps to the newest, `o` or Enter opens the article
 URL through the platform opener without a shell, `q` or Ctrl-C quits, and Ctrl-Z suspends (raw mode
 delivers it as a key). `tui.Run` returns the context's
 error when canceled; Bubble Tea's own signal handler is disabled so that the command owns signals.

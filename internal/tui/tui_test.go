@@ -229,7 +229,7 @@ func press(t *testing.T, m *model, keys ...string) {
 // build makes a model without timers, which would block these synchronous tests.
 func build(t *testing.T, river River, open func(string) error) *model {
 	m := newModel(t.Context(), river, open, func() time.Time { return now })
-	m.tick, m.animate, m.minSpin = nil, false, 0
+	m.tick, m.animate, m.minSpin, m.saveDelay = nil, false, 0, 0
 	return m
 }
 
@@ -732,8 +732,9 @@ func TestPullToRefresh(t *testing.T) {
 		t.Error("pulling below the head refreshed")
 	}
 	// A refresh that finishes below the head leaves new posts waiting above the window.
-	window := rowTitles(below.rows)
-	if _, cmd := below.Update(refreshed{}); cmd != nil || !slices.Equal(rowTitles(below.rows), window) || below.newer == nil {
+	window, generation := rowTitles(below.rows), below.window
+	send(t, below, refreshed{})
+	if !slices.Equal(rowTitles(below.rows), window) || below.window != generation || below.newer == nil {
 		t.Error("a refresh below the head reloaded the window")
 	}
 }
@@ -891,8 +892,9 @@ func TestRefreshDuringReloadReloadsAgain(t *testing.T) {
 	if _, err := river.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, cmd := m.Update(refreshed{}); cmd != nil {
-		t.Fatal("a second reload ran alongside the first")
+	m.Update(refreshed{}) // Its save may run; its reload must wait for the one in flight.
+	if !m.reloading || !m.reloadAgain {
+		t.Fatal("a second reload ran alongside the first instead of waiting for it")
 	}
 	send(t, m, first)
 	if m.rows[0].title != "saved by the second refresh" || m.reloading {
@@ -1021,5 +1023,332 @@ func TestDoubleTapToRefresh(t *testing.T) {
 	tap(m, time.Second, key("k"))
 	if status := strings.TrimSpace(screen(m)[7]); status != "Press again to refresh." {
 		t.Errorf("the first tap did not explain the gesture: %q", status)
+	}
+}
+
+// counting records how often the TUI reports reaching a post.
+type counting struct {
+	*reader.Reader
+	reaches atomic.Int32
+}
+
+func (c *counting) Reached(position reader.Position) {
+	c.reaches.Add(1)
+	c.Reader.Reached(position)
+}
+
+// saveAt makes the post titled title the saved reading position, as an earlier session would have.
+func saveAt(t *testing.T, river *reader.Reader, title string) reader.Position {
+	t.Helper()
+	for query := (reader.Query{Limit: 200}); ; {
+		page, err := river.Timeline(t.Context(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.Title == title {
+				river.Reached(item.Position)
+				if err := river.SaveSeen(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				return item.Position
+			}
+		}
+		if page.Next == nil {
+			t.Fatalf("no post titled %q", title)
+		}
+		query.Before = page.Next
+	}
+}
+
+func savedTitle(t *testing.T, m *model) string {
+	t.Helper()
+	position, err := m.river.SeenPosition(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if position == nil {
+		return ""
+	}
+	all, err := m.river.Timeline(t.Context(), reader.Query{Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range all.Items {
+		if item.Position == *position {
+			return item.Title
+		}
+	}
+	return "(not in the newest 200)"
+}
+
+// dividerAt returns the screen line index of the divider, or -1.
+func dividerAt(m *model) int {
+	for i, line := range screen(m) {
+		if strings.HasPrefix(line, "── You left off here ") {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestResumesWhereTheReaderLeftOff(t *testing.T) {
+	inner, _ := seed(t, numbered(130))
+	saved := saveAt(t, inner, "post 100")
+	river := &counting{Reader: inner}
+	m := start(t, river, 60, 16, noOpen(t))
+	if !strings.Contains(selected(t, m), "post 100") || m.divider == nil || *m.divider != saved {
+		t.Fatalf("resumed at %q with divider %v", selected(t, m), m.divider)
+	}
+	// The nearest newer page (posts 50–99) with more above it, then everything below: posts 100–129.
+	if m.newer == nil || m.rows[0].title != "post 50" || len(m.rows) != 80 {
+		t.Errorf("window starts at %q with %d posts, newer %v", m.rows[0].title, len(m.rows), m.newer)
+	}
+	lines := screen(m)
+	divider := dividerAt(m)
+	if divider < 0 || !strings.HasPrefix(lines[divider+1], "▸ ") || !strings.Contains(lines[divider-1], "post 99") {
+		t.Fatalf("divider is not between post 99 and the resumed post:\n%s", strings.Join(lines, "\n"))
+	}
+	if screenRow := m.cursor - m.offset; screenRow < m.visible()/2 {
+		t.Errorf("resumed post is on screen row %d, want the lower part so newer posts show above it", screenRow)
+	}
+	if got := strings.TrimRight(lines[divider], " "); got != "── You left off here "+strings.Repeat("─", 60-21) {
+		t.Errorf("divider = %q", got)
+	}
+	if river.reaches.Load() != 0 || savedTitle(t, m) != "post 100" {
+		t.Errorf("launch placement or the launch refresh reached %d posts; saved %q", river.reaches.Load(), savedTitle(t, m))
+	}
+}
+
+func TestResumeEdges(t *testing.T) {
+	t.Run("no saved position", func(t *testing.T) {
+		river, _ := seed(t, numbered(10))
+		m := start(t, river, 60, 12, noOpen(t))
+		if m.divider != nil || dividerAt(m) >= 0 || !strings.Contains(selected(t, m), "post 0") {
+			t.Errorf("first launch drew a divider or did not open at the newest post")
+		}
+	})
+	t.Run("saved at the newest post", func(t *testing.T) {
+		river, _ := seed(t, numbered(10))
+		saveAt(t, river, "post 0")
+		m := start(t, river, 60, 12, noOpen(t))
+		if !strings.Contains(selected(t, m), "post 0") || m.newer != nil || dividerAt(m) != 1 {
+			t.Errorf("caught up: selected %q, divider on line %d", selected(t, m), dividerAt(m))
+		}
+	})
+	t.Run("nothing at or below the saved position", func(t *testing.T) {
+		river, fetch := seed(t, numbered(10))
+		saveAt(t, river, "post 9")
+		fetch.serve("alpha", fresh("id:9", "post 9", 30*time.Second)) // The oldest post moves to the top.
+		if _, err := river.Refresh(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		m := start(t, river, 60, 16, noOpen(t))
+		if !strings.Contains(selected(t, m), "post 8") || m.cursor != len(m.rows)-1 {
+			t.Errorf("cursor should start on the oldest post above the saved position, got %q", selected(t, m))
+		}
+		if divider := dividerAt(m); divider < 0 || !strings.HasPrefix(screen(m)[divider-1], "▸ ") {
+			t.Errorf("divider should sit below every loaded post:\n%s", strings.Join(screen(m), "\n"))
+		}
+	})
+}
+
+func TestReadingUpwardSavesTheFurthestPost(t *testing.T) {
+	inner, _ := seed(t, numbered(130))
+	saveAt(t, inner, "post 100")
+	river := &counting{Reader: inner}
+	m := start(t, river, 60, 16, noOpen(t))
+	press(t, m, "k", "k")
+	if river.reaches.Load() != 4 {
+		t.Errorf("two moves reported %d reaches, want the post left and landed on for each", river.reaches.Load())
+	}
+	stale := m.reach - 1
+	send(t, m, seenIdle{stale})
+	if savedTitle(t, m) != "post 100" {
+		t.Error("a superseded idle timer saved")
+	}
+	send(t, m, seenIdle{m.reach})
+	if savedTitle(t, m) != "post 98" {
+		t.Errorf("after pausing, saved %q, want the furthest post reached", savedTitle(t, m))
+	}
+	for range 5 {
+		press(t, m, "j") // Reading older never moves the saved position back.
+	}
+	send(t, m, seenIdle{m.reach})
+	if savedTitle(t, m) != "post 98" {
+		t.Errorf("scrolling older moved the saved position to %q", savedTitle(t, m))
+	}
+}
+
+func TestFirstLaunchSavesTheHeadOnTheFirstMove(t *testing.T) {
+	river, _ := seed(t, numbered(10))
+	m := start(t, river, 60, 12, noOpen(t))
+	press(t, m, "j")
+	send(t, m, seenIdle{m.reach})
+	if savedTitle(t, m) != "post 0" {
+		t.Errorf("saved %q, want the newest post the reader moved away from", savedTitle(t, m))
+	}
+}
+
+func TestJumpAndOpenReachTheirPost(t *testing.T) {
+	inner, _ := seed(t, numbered(130))
+	saveAt(t, inner, "post 100")
+	m := start(t, inner, 60, 16, noOpen(t))
+	press(t, m, "g")
+	send(t, m, seenIdle{m.reach})
+	if !strings.Contains(selected(t, m), "post 0") || savedTitle(t, m) != "post 0" {
+		t.Errorf("g selected %q and saved %q; want the newest post for both", selected(t, m), savedTitle(t, m))
+	}
+
+	fresh, _ := seed(t, numbered(10))
+	m = start(t, fresh, 60, 12, func(string) error { return nil })
+	press(t, m, "o")
+	send(t, m, seenIdle{m.reach})
+	if savedTitle(t, m) != "post 0" {
+		t.Errorf("opening a post saved %q", savedTitle(t, m))
+	}
+}
+
+func TestRefreshSavesAndNeverReaches(t *testing.T) {
+	inner, fetch := seed(t, numbered(20))
+	river := &counting{Reader: inner}
+	m := start(t, river, 60, 12, noOpen(t))
+	press(t, m, "j", "k") // Reached without pausing.
+	reaches := river.reaches.Load()
+	fetch.serve("alpha", fresh("new", "fresh post", 0))
+	pull(t, m)
+	if savedTitle(t, m) != "post 0" {
+		t.Errorf("a refresh did not save the reached position: %q", savedTitle(t, m))
+	}
+	if river.reaches.Load() != reaches {
+		t.Error("the refresh or its reconciliation reported reaching a post")
+	}
+}
+
+func TestExitSavesTheReadingPosition(t *testing.T) {
+	river, _ := seed(t, numbered(3))
+	ctx, cancel := context.WithCancel(t.Context())
+	m := newModel(ctx, river, noOpen(t), func() time.Time { return now })
+	m.tick, m.animate, m.saveDelay = nil, false, 0
+	head, err := river.Timeline(t.Context(), reader.Query{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	river.Reached(head.Items[0].Position) // Reached, but not yet saved, when a signal ends the program.
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if err := run(ctx, m, tea.WithInput(nil), tea.WithOutput(io.Discard)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run returned %v", err)
+	}
+	if savedTitle(t, m) != "post 0" {
+		t.Errorf("exit did not save the reached position: %q", savedTitle(t, m))
+	}
+}
+
+func TestDividerAppearsOnlyWhereItFalls(t *testing.T) {
+	river, _ := seed(t, numbered(130))
+	saveAt(t, river, "post 100")
+	m := start(t, river, 60, 16, noOpen(t))
+	press(t, m, "g")                                     // The newest page does not reach post 100.
+	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 60}) // Show the whole window, down to its last post.
+	if len(m.rows) != 50 || m.older == nil || dividerAt(m) >= 0 {
+		t.Fatalf("a divider was drawn next to posts that are not loaded (%d loaded):\n%s", len(m.rows), strings.Join(screen(m), "\n"))
+	}
+	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 16})
+	for !strings.Contains(selected(t, m), "post 100") {
+		press(t, m, "j")
+	}
+	divider := dividerAt(m)
+	if divider < 0 || !strings.Contains(screen(m)[divider-1], "post 99") || !strings.Contains(screen(m)[divider+1], "post 100") {
+		t.Errorf("divider not between post 99 and post 100 after scrolling down:\n%s", strings.Join(screen(m), "\n"))
+	}
+	for _, height := range []int{3, 4, 5, 8} {
+		send(t, m, tea.WindowSizeMsg{Width: 60, Height: height})
+		if len(screen(m)) != height {
+			t.Errorf("height %d rendered %d lines", height, len(screen(m)))
+		}
+		selected(t, m) // The divider never pushes the cursor off screen.
+	}
+}
+
+func TestLaunchRefreshBeforeTheWindowStillResumes(t *testing.T) {
+	river, _ := seed(t, numbered(130))
+	saveAt(t, river, "post 100")
+	m := build(t, river, noOpen(t))
+	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 16})
+	first := m.readWindow(m.resumeRead)() // The launch read, still in flight.
+	send(t, m, refreshed{})               // The launch refresh finishes first and rereads the window.
+	send(t, m, first)
+	if !strings.Contains(selected(t, m), "post 100") || m.divider == nil {
+		t.Errorf("rereading during launch did not resume: selected %q", selected(t, m))
+	}
+}
+
+func TestJumpSurvivesASupersedeAndARetry(t *testing.T) {
+	inner, _ := seed(t, numbered(130))
+	saveAt(t, inner, "post 100")
+	m := start(t, inner, 60, 16, noOpen(t))
+	_, cmd := m.Update(key("g"))
+	stale := cmd() // The jump read, overtaken by a refresh's reread below.
+	send(t, m, refreshed{})
+	send(t, m, stale)
+	send(t, m, seenIdle{m.reach})
+	if !strings.Contains(selected(t, m), "post 0") || savedTitle(t, m) != "post 0" {
+		t.Errorf("a superseded jump lost its skip: selected %q, saved %q", selected(t, m), savedTitle(t, m))
+	}
+
+	failing, _ := seed(t, numbered(130))
+	saveAt(t, failing, "post 100")
+	river := &flaky{Reader: failing}
+	m = start(t, river, 60, 16, noOpen(t))
+	river.failures = 1
+	press(t, m, "g") // Fails; the next move retries the jump, not a plain newest-posts read.
+	press(t, m, "j")
+	send(t, m, seenIdle{m.reach})
+	if !strings.Contains(selected(t, m), "post 0") || savedTitle(t, m) != "post 0" {
+		t.Errorf("a retried jump lost its skip: selected %q, saved %q", selected(t, m), savedTitle(t, m))
+	}
+}
+
+func TestResumePlacementWaitsForTheTerminalSize(t *testing.T) {
+	river, _ := seed(t, numbered(130))
+	saveAt(t, river, "post 100")
+	m := build(t, river, noOpen(t))
+	send(t, m, m.readWindow(m.resumeRead)()) // Arrives before the first size.
+	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 16})
+	if screenRow := m.cursor - m.offset; !strings.Contains(selected(t, m), "post 100") || screenRow < m.visible()/2 {
+		t.Errorf("resumed post is on screen row %d, want the lower part", screenRow)
+	}
+}
+
+func TestDividerReservesALineOnlyWhenLoaded(t *testing.T) {
+	river, _ := seed(t, numbered(130))
+	saveAt(t, river, "post 100")
+	m := start(t, river, 60, 16, noOpen(t))
+	press(t, m, "g") // The newest page does not reach the divider.
+	for range m.visible() - 3 {
+		press(t, m, "j") // Down to the last row that fits with a two-row margin below it.
+	}
+	if m.offset != 0 {
+		t.Errorf("scrolled early (offset %d): a line was set aside for a divider that is not loaded", m.offset)
+	}
+}
+
+func TestOnlyOpenedArticlesAreReached(t *testing.T) {
+	inner, _ := seed(t, numbered(3))
+	river := &counting{Reader: inner}
+	m := start(t, river, 60, 8, func(string) error { return errors.New("no browser") })
+	press(t, m, "o")
+	if river.reaches.Load() != 0 || !strings.Contains(screen(m)[7], "no browser") {
+		t.Errorf("a failed open reached %d posts", river.reaches.Load())
+	}
+}
+
+func TestEachMoveSchedulesOneSave(t *testing.T) {
+	river, _ := seed(t, numbered(10))
+	m := start(t, river, 60, 8, noOpen(t))
+	before := m.reach
+	press(t, m, "j")
+	if m.reach != before+1 {
+		t.Errorf("one move scheduled %d saves", m.reach-before)
 	}
 }
