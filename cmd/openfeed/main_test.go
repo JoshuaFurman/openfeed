@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -191,6 +192,48 @@ func TestRunReturnsPresenterErrors(t *testing.T) {
 	err := run(t.Context(), io.Discard, unavailable, func(context.Context, tui.River) error { return failure })
 	if !errors.Is(err, failure) {
 		t.Errorf("run returned %v, want the presenter's error", err)
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		showVersion bool
+		wantErr     bool
+		help        bool
+		stderr      string
+	}{
+		{"no arguments", nil, false, false, false, ""},
+		{"double-dash version", []string{"--version"}, true, false, false, ""},
+		{"single-dash version", []string{"-version"}, true, false, false, ""},
+		{"help", []string{"--help"}, false, true, true, "usage: openfeed"},
+		{"short help", []string{"-h"}, false, true, true, "usage: openfeed"},
+		{"unknown flag", []string{"--verbose"}, false, true, false, "flag provided but not defined: -verbose\nusage: openfeed"},
+		{"future subcommand", []string{"serve"}, false, true, false, "unexpected argument \"serve\"\nusage: openfeed"},
+		{"argument after a flag", []string{"--version", "now"}, false, true, false, `unexpected argument "now"`},
+		{"escape sequence in an argument", []string{"\x1b[2J"}, false, true, false, `unexpected argument "\x1b[2J"`},
+		{"escape sequence in a flag", []string{"--\x1b[2J"}, false, true, false, "flag provided but not defined: - [2J"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			showVersion, err := parseArgs(tc.args, &stderr)
+			if showVersion != tc.showVersion || (err != nil) != tc.wantErr || errors.Is(err, flag.ErrHelp) != tc.help {
+				t.Errorf("parseArgs(%q) = %v, %v", tc.args, showVersion, err)
+			}
+			if (tc.stderr == "" && stderr.Len() > 0) || !strings.Contains(stderr.String(), tc.stderr) {
+				t.Errorf("parseArgs(%q) wrote %q, want %q", tc.args, stderr.String(), tc.stderr)
+			}
+			if strings.ContainsRune(stderr.String(), '\x1b') {
+				t.Errorf("parseArgs(%q) wrote an escape sequence: %q", tc.args, stderr.String())
+			}
+		})
+	}
+}
+
+func TestVersionIsNeverBlank(t *testing.T) {
+	if version() == "" {
+		t.Error("version is blank")
 	}
 }
 

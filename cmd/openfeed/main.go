@@ -4,12 +4,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/JoshuaFurman/openfeed/internal/config"
@@ -20,6 +22,17 @@ import (
 )
 
 func main() {
+	showVersion, err := parseArgs(os.Args[1:], os.Stderr)
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return
+	case err != nil:
+		os.Exit(2)
+	case showVersion:
+		fmt.Println("openfeed", version())
+		return
+	}
+
 	ctx, cancel := context.WithCancelCause(context.Background())
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -28,7 +41,7 @@ func main() {
 		signal.Stop(signals) // A second signal during cleanup uses the default behavior and exits.
 		cancel(interrupted{received})
 	}()
-	err := run(ctx, os.Stdout, &http.Client{}, tui.Run)
+	err = run(ctx, os.Stdout, &http.Client{}, tui.Run)
 	signal.Stop(signals)
 
 	code, report := exitStatus(err, context.Cause(ctx))
@@ -36,6 +49,38 @@ func main() {
 		fmt.Fprintln(os.Stderr, "openfeed:", tui.Sanitize(report.Error()))
 	}
 	os.Exit(code)
+}
+
+const usage = "usage: openfeed [--version]\n\n  --version  print the version and exit\n"
+
+// parseArgs reads the command line, writing usage and mistakes to stderr.
+// Asking for help returns flag.ErrHelp; positional arguments are mistakes, not ignored.
+func parseArgs(args []string, stderr io.Writer) (showVersion bool, err error) {
+	flags := flag.NewFlagSet("openfeed", flag.ContinueOnError)
+	flags.SetOutput(io.Discard) // The flag package's own messages would bypass Sanitize.
+	flags.Usage = func() {}
+	flags.BoolVar(&showVersion, "version", false, "")
+	err = flags.Parse(args)
+	if err == nil && flags.NArg() > 0 {
+		err = fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stderr, tui.Sanitize(err.Error()))
+		}
+		fmt.Fprint(stderr, usage)
+		return false, err
+	}
+	return showVersion, nil
+}
+
+// version is the module version Go stamped into the build: a release tag, a pseudo-version
+// naming the commit, or "(devel)" when the build carries no version control information.
+func version() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
 }
 
 // interrupted records which signal canceled the run.

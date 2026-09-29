@@ -44,6 +44,7 @@ go build ./cmd/openfeed
 ```
 
 There is no cgo anywhere in the dependency tree, so cross-compiling is just `GOOS`/`GOARCH`.
+`openfeed --version` prints the version you have.
 
 ## Usage
 
