@@ -1,0 +1,46 @@
+# Release artifacts for a pushed vX.Y.Z tag; .github/workflows/release.yml runs this.
+# Check locally with: goreleaser check && goreleaser release --snapshot --clean
+version: 2
+
+project_name: openfeed
+
+builds:
+  - main: ./cmd/openfeed
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # No -X: `openfeed --version` reads the tag Go stamps into the build info.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^(docs|chore|test|ci)(\(.+\))?:'
+
+homebrew_casks:
+  - name: openfeed
+    homepage: https://github.com/JoshuaFurman/openfeed
+    description: A TUI-first RSS reader with the feel of a chronological timeline
+    repository:
+      owner: JoshuaFurman
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    # The binary is not signed or notarized, so Gatekeeper would refuse to run it.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/openfeed"]
+          end

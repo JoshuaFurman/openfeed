@@ -5,9 +5,8 @@ A TUI-first RSS reader in Go. The reading *feel* of a social timeline; the sourc
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](go.mod)
 
-> **Status: early. Not yet usable as a reader.**
-> `openfeed` opens the river in your terminal where you left off, and refreshes it in the background.
-> [`PLAN.md`](PLAN.md) tracks what is left for v0.1.
+> **Status: v0.1, a read-only river.** openfeed reads, refreshes, and remembers your place.
+> It is early: expect rough edges and changes between versions. [`PLAN.md`](PLAN.md) tracks what comes next.
 
 ## Why
 
@@ -29,7 +28,17 @@ Later, the same core gets a web face (`openfeed serve`, localhost, htmx) and opt
 
 ## Install
 
-Requires Go 1.26 or newer.
+With Homebrew:
+
+```sh
+brew install --cask joshuafurman/tap/openfeed
+```
+
+Or download an archive for macOS, Linux, or Windows from the
+[latest release](https://github.com/JoshuaFurman/openfeed/releases/latest). The binaries are not
+signed, so on macOS a browser download needs `xattr -d com.apple.quarantine openfeed` before it runs.
+
+Or with Go 1.26.6 or newer:
 
 ```sh
 go install github.com/JoshuaFurman/openfeed/cmd/openfeed@latest
@@ -88,6 +97,17 @@ details.
 | `q` or Ctrl-C | Quit |
 | Ctrl-Z | Suspend to the shell (`fg` returns) |
 
+## Not yet
+
+v0.1 is deliberately small. It does not have:
+
+- a reader pane: `o` opens the article in your browser;
+- subscription commands or OPML import: edit `config.toml`;
+- search, feed or tag filters, the web UI, or AI features;
+- pruning: cached posts are never deleted, so the database grows with your subscriptions. Removing a
+  feed from the config hides its posts without deleting them;
+- log rotation: the log file grows too.
+
 ## Files
 
 openfeed follows XDG conventions **on every platform, including macOS** — you get
@@ -96,7 +116,7 @@ openfeed follows XDG conventions **on every platform, including macOS** — you 
 | Path | Contents |
 |---|---|
 | `$XDG_CONFIG_HOME/openfeed/config.toml` | **Intent.** Your subscriptions. Hand-edited, git-able. |
-| `$XDG_DATA_HOME/openfeed/openfeed.db` | **Local state.** Cached posts, extracted text, reading position. |
+| `$XDG_DATA_HOME/openfeed/openfeed.db` | **Local state.** Cached posts and your reading position. |
 | `$XDG_STATE_HOME/openfeed/openfeed.log` | Logs. |
 
 Defaults when those variables are unset: `~/.config`, `~/.local/share`, `~/.local/state`.

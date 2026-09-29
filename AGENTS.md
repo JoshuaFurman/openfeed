@@ -37,7 +37,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Refresh outcomes** | An explicit `Unchanged` outcome requires existing cached feed state and no items; a full outcome may contain zero items. Persist the supplied validators and fetch timestamp exactly in either case; no failure outcome is persisted. | An empty feed is not an unchanged feed. The fetcher already resolves validator inheritance, so storage must not merge tokens again. |
 | **Refresh schema** | `feeds` stores URL, validators, accepted fetch timestamp, and revision. `items` stores stable IDs, feed URL/key uniqueness, publisher fields, nullable publication time, and immutable first-fetch time; no config labels or tags. | Keep refresh persistence cohesive without pre-building timeline, seen-state, extraction, or subscription-management schema. |
 | **Timestamp storage** | Fixed-width UTC text with nine fractional digits, covering years 0000–9999; absent publication time is NULL. Reject unsupported dates rather than rounding or overflowing. | Canonical text compares chronologically and preserves nanoseconds without Unix nanoseconds' roughly 1678–2262 range limit. |
-| **Refresh retention** | Refreshes never delete omitted items or prune cached feeds. Config remains authoritative for which subscriptions are active. | Feed responses are often sliding windows, not deletion lists. A bounded retention/removal policy belongs to its own reviewed increment. |
+| **Retention** | Nothing deletes cached posts or feeds: refreshes keep omitted items, and removing a subscription from config only hides its cache. Pruning arrives as its own reviewed increment, after a migration rebuilds `items` with `AUTOINCREMENT`. Unbounded growth is accepted for v0.1. | Feed responses are often sliding windows, not deletion lists. Without `AUTOINCREMENT`, SQLite reuses a deleted highest `rowid`, and the seen tie-breaker and first-fetch lookup require IDs never to be reused. |
 | **SQLite connections** | WAL, one connection per store, foreign keys enabled, and FULL synchronous durability. Retry busy lock acquisition for at most five seconds, respecting caller cancellation; never replay a partially executed transaction. | Small local operations do not need an in-process pool. WAL permits readers in another process during writes; Go-managed waits avoid a long, non-cancellable SQLite busy timeout. |
 | **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
 | **Source of truth** | **Config is intent; the DB is local state.** Feeds are declared in hand-editable `config.toml`. The DB holds feed caches, derived data, and the saved reading position; it never owns a subscription. | Deleting `openfeed.db` never loses a subscription. It does lose the reading position, which is not regenerable, and cached posts that have left their feeds' windows. Subscriptions stay greppable and version-controllable. |
@@ -62,6 +62,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
 | **Paths** | XDG conventions **on all platforms, including macOS.** Hand-rolled in `internal/config`, ~40 lines, no dependency. | Primary dev machine is darwin, where `adrg/xdg` would resolve to `~/Library/Application Support`. We want `~/.config/openfeed` everywhere. |
+| **Versions and releases** | `openfeed --version` prints the module version Go stamps into the build info. A pushed `vX.Y.Z` tag runs GoReleaser: darwin/linux/windows × amd64/arm64 archives and a Homebrew cask in `JoshuaFurman/homebrew-tap`. | Go stamps the tag, a commit pseudo-version, or `+dirty` into every build, so `go install`, local, and release builds agree without `-X` ldflags or a package-level variable. The binaries are unsigned; the cask clears quarantine because signing and notarization need a paid Apple Developer account. |
 
 ### Refresh item semantics
 
@@ -399,7 +400,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | `charm.land/bubbletea/v2` · `lipgloss/v2` | in use | TUI event loop and display-width-aware styling. v2 is the current stable line (2.0.10 / 2.0.6). |
 | `charm.land/bubbles/v2` | in use | The refresh spinner. `bubbles/list` is deliberately unused. |
 | `github.com/charmbracelet/x/ansi` | in use | Display-cell width and ANSI-aware truncation for the river's columns. Already a Lip Gloss dependency, so using it directly adds nothing to the build. |
-| `cobra` | planned | CLI |
+| `cobra` | planned | CLI subcommands, from the first one. Until then, stdlib `flag` parses the lone `--version`, and positional arguments are rejected rather than ignored. |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
 | `modernc.org/sqlite` | in use | pure-Go, no cgo (see §2) |
 | `go-shiori/go-readability` | later | article extraction |
@@ -411,6 +412,10 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 ```
 go install honnef.co/go/tools/cmd/staticcheck@latest
 ```
+
+`.goreleaser.yaml` is checked with `goreleaser check` and `goreleaser release --snapshot --clean`.
+GoReleaser v2.18 needs Go 1.27 to build from source, so use a prebuilt binary (`brew install goreleaser`)
+or `go run github.com/goreleaser/goreleaser/v2@latest`, which switches toolchains automatically.
 
 ---
 

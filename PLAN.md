@@ -6,67 +6,47 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** configuration, standalone feed fetching, store lifecycle/migrations, atomic refresh
-  persistence, chronological-range timeline queries across selected active subscriptions, the
-  saved seen position (`b5384a3`), timeline dates capped at first fetch (`0c1d8a3`), reader
-  orchestration (`bf4e163`), command wiring (`56309c5`), newer-than timeline reads (`6990119`), and
-  the TUI river (`c0b67a3`), and refresh inside the TUI with a double-tap pull (`ee8f22f`).
-  Settled decisions and contracts are in `AGENTS.md`.
+- **Completed:** v0.1's read-only river: configuration, feed fetching, the SQLite store, reader
+  orchestration, command wiring (`56309c5`), and the TUI river (`c0b67a3`) with refresh (`ee8f22f`)
+  and resuming where the reader left off (`11c99ad`). Settled decisions and contracts are in `AGENTS.md`.
 - **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
   "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
   a double-tap of `k`/↑ at the newest post, and saves the furthest reached position: after 2s idle,
   after refreshes, and at exit. First launch opens at the newest post. Signals exit 130/143 quietly and
-  still save.
-- **Last review (TUI increment 4, before commit):** 9 findings, all verified.
-  - **Fixed, each with a test that fails without it:**
-    - a `g` jump superseded by a refresh's reread, or retried after a failure, became a plain
-      newest-posts read and never saved the skip. Pending reads now remember their kind
-      (`pendingRead` replaces the `resuming` flag and two redundant message fields);
-    - a resume read arriving before the terminal size lost the lower-third placement;
-    - a line was set aside for a divider that was not loaded;
-    - `o` reached a post even when the article failed to open;
-    - each move scheduled two save timers.
-  - **Also fixed:** the exit save and shutdown are deferred again, so a panic cannot skip them.
-  - **Rejected:** the two resume reads not being a snapshot. The refresh's reread through the window's
-    bottom already brings in anything committed between them, and a failed reread retries on the next
-    move.
-
-  Earlier: TUI increment 3 was reviewed before `ee8f22f`; its double-tap change was not separately
-  reviewed. Item-ID reuse after deleting the highest-ID row remains a hard retention requirement.
-- **Next action:** the user commits TUI increment 4. Then the remaining v0.1 work:
-  - the retention/removed-subscriptions policy (an open question below);
-  - an end-to-end check of first-run and cached/offline reading, with user-facing instructions;
-  - v0.1 acceptance.
-- **Implementation in progress:** TUI increment 4 is implemented, reviewed, fixed, and verified, but
-  not yet committed. It covers:
-  - the resume read (saved position, then `After`, then `Before`), used for rereads until the first
-    window arrives;
-  - the divider, drawn only among loaded posts and giving way on short terminals;
-  - `Reached` on navigation (the post left and the post landed on), `g`, and `o`;
-  - `SaveSeen` after 2s idle (only the latest navigation's timer), after refreshes, and at exit under a
-    detached 5s deadline.
-
-- **Last verification (increment 4):** every gate passed:
-  - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
-  - `go mod verify` and `go mod tidy -diff`;
-  - `git diff --check`, and the format-character scan.
-
-  After the review fixes, TUI coverage is 94.2%, TUI tests passed 25 race-detector runs, and undoing
-  each fix made a test fail. One test needed rethinking first: a reserved line only shows as early
-  scrolling. Deliberately breaking each seen rule made a test fail:
-  - launch reaching;
-  - only the landed post reaching;
-  - stale idle timers saving;
-  - refresh or exit not saving;
-  - `g` or `o` not reaching;
-  - launching at the newest;
-  - a divider beside unloaded posts;
-  - a divider pushing the cursor off screen.
-
-  One test needed a taller terminal before it caught its break. In a real pseudo-terminal, a first
-  launch drew no divider, moved with `j`, and quit (exit 0). The saved position was then exactly the
-  newest post, and the relaunch drew "You left off here" (exit 0). The binary cross-builds for
-  Linux/amd64 and Windows/amd64.
+  still save. `openfeed --version` prints the build's module version.
+- **Implementation in progress: v0.1.0 release preparation.** Implemented and verified, but not yet
+  reviewed or committed:
+  - `--version` from the build info, parsed with stdlib `flag`. `-h` exits 0; unknown flags and
+    positional arguments print usage and exit 2 (`TestParseArgs`).
+  - `.goreleaser.yaml` and `.github/workflows/release.yml`: on a pushed `vX.Y.Z` tag, archives for
+    darwin/linux/windows × amd64/arm64, checksums, a changelog, and a Homebrew cask pushed to
+    `JoshuaFurman/homebrew-tap`.
+  - Retention settled: nothing deletes in v0.1 ([`AGENTS.md`](AGENTS.md#2-decisions-made), Retention),
+    closing the open question.
+  - README: status, install paths, `--version`, what v0.1 does not do yet, and the database contents.
+- **Last verification (release preparation):**
+  - formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`, `go mod verify`, and
+    `go mod tidy -diff`;
+  - `--version` in a scratch copy: a pseudo-version untagged, `v0.1.0` at the tag, and `v0.1.0+dirty`
+    with uncommitted changes. `-h` exits 0; `serve` and `--bogus` exit 2;
+  - GoReleaser v2.18.2 `check`, and a snapshot release at a scratch `v0.1.0` tag: six archives with
+    LICENSE and README, a cask with macOS and Linux URLs, and binaries printing `openfeed v0.1.0`;
+  - v0.1 acceptance in a real pseudo-terminal, with one local feed and one dead feed. A first launch
+    showed "No posts yet. Refreshing…", filled in the local posts, named the dead feed's failure, moved
+    with `j`, and exited 0. With the server stopped and both feeds due, a relaunch showed the cached
+    river below "You left off here" and "2 feeds failing: local, dead (details in the log)", exit 0.
+    With empty XDG directories, the first run wrote the starter config and exited 0.
+- **Next action:** the user reviews and commits the release preparation, then publishes:
+  1. In GitHub's email settings, confirm the commit address is verified, and that "Block command line
+     pushes that expose my email" is off.
+  2. Create the empty public repository `JoshuaFurman/openfeed`, add it as `origin`, push `main`, and
+     wait for CI.
+  3. Create the public repository `JoshuaFurman/homebrew-tap` with a README, so GoReleaser has a
+     default branch to commit the cask to.
+  4. Create a fine-grained token for `homebrew-tap` only, with Contents read and write, and save it as
+     the `HOMEBREW_TAP_GITHUB_TOKEN` Actions secret in `openfeed`.
+  5. Tag the CI-green commit `v0.1.0` and push the tag. The release workflow publishes.
+  6. Check the release page, `brew install --cask joshuafurman/tap/openfeed`, and `openfeed --version`.
 
 ### Keeping this useful
 
@@ -201,11 +181,10 @@ advance, keeps a session's displayed divider, or renders "You left off here".
 - Lifecycle tests now follow the embedded migration count; migration-engine tests start from an
   isolated bookkeeping-only schema so future domain migrations do not change their fixtures.
 
-**Remaining storage work:** none planned for v0.1 beyond the retention open question below. Apply the
-quality gates in `AGENTS.md` to each increment.
+**Remaining storage work:** none for v0.1. Retention is settled: nothing deletes until a pruning
+increment (see Later). Apply the quality gates in `AGENTS.md` to each increment.
 
-**Still deferred:** launch refresh, scheduling, rendering, full-text extraction, search, web serving,
-or AI. Do not introduce their packages or schema speculatively.
+**Still deferred:** periodic refresh scheduling, full-text extraction, search, web serving, or AI. Do not introduce their packages or schema speculatively.
 
 ### Then: `internal/reader` and command wiring
 
@@ -267,7 +246,7 @@ The article operation remains deferred until there is a reader pane.
 - [x] Add `j`/`k` navigation and `o` to open a usable article URL in the browser.
 - [x] Show the seen divider and persist the agreed position as the user reads/exits.
 - [x] Handle empty config, empty feeds, refresh failures, resize, and clean shutdown.
-- [ ] Verify first-run and cached/offline reading end to end; update user-facing instructions.
+- [x] Verify first-run and cached/offline reading end to end; update user-facing instructions.
 
 TUI requirements already settled:
 - refresh at launch while the cached river shows;
@@ -347,7 +326,7 @@ store. Tests cover:
   2. River rendering, navigation, paging, `o`, resize, empty states, and quit, replacing the printout
      (`c0b67a3`).
   3. Launch and pull refresh with reconciliation (`ee8f22f`).
-  4. Seen: divider, resume placement, and saves (implemented and reviewed; commit pending).
+  4. Seen: divider, resume placement, and saves (`11c99ad`).
 
 **Increment 1 (approved; contract in [`AGENTS.md`](AGENTS.md#timeline-reads)):** add `After` to
 `TimelineQuery` and `reader.Query`. It selects the posts nearest above it (strictly newer, nearest
@@ -375,13 +354,16 @@ Resolve a question before the work it affects, not every future question up fron
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| Retention and removed subscriptions | Explicit policy before v0.1 completion | Decide how to bound growth and whether to eventually prune inactive caches. Active-config visibility is settled; refreshes and queries do not delete cached posts. Subscriptions never become DB-owned. `items.id` lacks `AUTOINCREMENT`, so deleting the highest-ID row lets SQLite reuse that ID (verified). Before any deletion, rebuild `items` with `AUTOINCREMENT` or never delete that row; the seen tie-breaker and first-fetch lookup rely on IDs never being reused. |
 | TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
 
 ## Later, roughly in order
 
 - [ ] Reader pane with on-demand full-text extraction and cached fallback to feed content.
 - [ ] Bound the log file, by rotation or size; each run currently appends without limit.
+- [ ] Prune cached posts, including removed subscriptions' caches. First rebuild `items` with
+  `AUTOINCREMENT`, so a deleted highest ID is never reused.
+- [ ] Sign and notarize the macOS binaries, replacing the cask's quarantine hook.
+- [ ] Update `ci.yml` to `actions/checkout@v7` and `actions/setup-go@v7`, matching the release workflow.
 - [ ] Feed management commands and OPML import/export, after solving TOML round-tripping.
 - [ ] FTS5 search.
 - [ ] Feed/tag filters over the same river.
