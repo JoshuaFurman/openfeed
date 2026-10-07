@@ -38,9 +38,13 @@ homebrew_casks:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     # The binary is not signed or notarized, so Gatekeeper would refuse to run it.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/openfeed"]
-          end
+    # Homebrew deprecated `postflight` for `postflight_steps`, but `hooks` still
+    # emits `postflight`; move this to `hooks.post.install_steps` once GoReleaser
+    # ships it (goreleaser/goreleaser#6873). The escaped braces render as
+    # Homebrew's literal `{{staged_path}}` placeholder.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/openfeed"]
+        end
+      end
