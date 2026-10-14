@@ -219,7 +219,7 @@ func (m *model) subscribed(msg subscribed) tea.Cmd {
 		m.form = nil
 	}
 	m.notice = "Subscribed to " + msg.feed.Name + "."
-	m.sizeNames()
+	m.labelFeeds()
 	return m.reload() // As after a refresh: the new feed's posts are reconciled into the span.
 }
 

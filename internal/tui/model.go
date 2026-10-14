@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"image/color"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 const (
 	prefetch     = 10 // How close the cursor gets to a window edge before the next page loads.
 	maxNameWidth = 20
+	maxTagWidth  = 16
+	minTitle     = 20                     // Narrower terminals drop the tag column to keep this much of each title.
 	minSpin      = 600 * time.Millisecond // A refresh that finds every feed fresh still registers.
 	reloadLimit  = 200
 	doubleTap    = 400 * time.Millisecond // Longest gap between the two taps of a pull.
@@ -30,14 +33,19 @@ type row struct {
 	position reader.Position
 	date     time.Time
 	feed     string
+	tags     []string
 	title    string
 	url      string
 }
 
 func newRow(item reader.Item) row {
+	tags := make([]string, len(item.FeedTags))
+	for i, tag := range item.FeedTags {
+		tags[i] = Sanitize(tag)
+	}
 	return row{
 		id: item.ID, position: item.Position, date: item.EffectiveDate(),
-		feed: Sanitize(item.FeedName), title: Sanitize(item.Title), url: item.URL,
+		feed: Sanitize(item.FeedName), tags: tags, title: Sanitize(item.Title), url: item.URL,
 	}
 }
 
@@ -129,12 +137,14 @@ type model struct {
 	offset        int // First visible row.
 	width, height int
 	nameWidth     int
-	feedCount     int                 // Configured subscriptions.
-	failing       []reader.FeedResult // Feeds that failed the latest refresh.
-	notice        string              // Replaces the status line until the next key press.
-	form          *addForm            // The add-feed popup, while it shows.
-	forms         int                 // Popups opened, which tells each one's answer apart.
-	picker        *tagPicker          // The tag filter popup, while it shows.
+	tagWidth      int                    // Zero when no feed has tags.
+	tagColors     map[string]color.Color // By sanitized tag.
+	feedCount     int                    // Configured subscriptions.
+	failing       []reader.FeedResult    // Feeds that failed the latest refresh.
+	notice        string                 // Replaces the status line until the next key press.
+	form          *addForm               // The add-feed popup, while it shows.
+	forms         int                    // Popups opened, which tells each one's answer apart.
+	picker        *tagPicker             // The tag filter popup, while it shows.
 }
 
 func newModel(ctx context.Context, river River, open func(string) error, now func() time.Time) *model {
@@ -145,17 +155,22 @@ func newModel(ctx context.Context, river River, open func(string) error, now fun
 		animate: true, minSpin: minSpin, saveDelay: saveDelay,
 		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
-	m.sizeNames()
+	m.labelFeeds()
 	return m
 }
 
-// sizeNames fits the name column to the configured feeds, so it shifts only when one is added, never as
-// pages load.
-func (m *model) sizeNames() {
+// labelFeeds takes the river's labels from the configured feeds. It fits the name and tag columns, so they
+// shift only when a feed is added, never as pages load, and colors each tag.
+func (m *model) labelFeeds() {
 	feeds := m.river.Feeds()
 	m.feedCount = len(feeds)
 	for _, f := range feeds {
 		m.nameWidth = min(max(m.nameWidth, ansi.StringWidth(Sanitize(f.Name))), maxNameWidth)
+		m.tagWidth = min(max(m.tagWidth, ansi.StringWidth(Sanitize(strings.Join(f.Tags, tagSeparator)))), maxTagWidth)
+	}
+	m.tagColors = make(map[string]color.Color)
+	for i, tag := range m.river.Tags() {
+		m.tagColors[Sanitize(tag)] = tagPalette[i%len(tagPalette)] // Config order, so adding a tag recolors none.
 	}
 }
 

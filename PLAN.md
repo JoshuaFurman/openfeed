@@ -9,15 +9,16 @@ work status and sequencing. Proposals here are not settled decisions until recor
 - **Completed:** v0.1's read-only river, released as `v0.1.0`: configuration, feed fetching, the
   SQLite store, reader orchestration, command wiring, and the TUI river with refresh and resuming where
   the reader left off. Settled decisions and contracts are in `AGENTS.md`.
-  Adding feeds in the TUI is committed (`b919f54`).
+  Adding feeds in the TUI (`b919f54`) and filtering by tag (`b673c69`) are committed.
 - **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
   "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
   a double-tap of `k`/↑ at the newest post, and saves the furthest reached position. `n` adds a feed
   from a popup; a first launch with no subscriptions opens the empty river and says to press `n`.
-  `/` filters the river by one tag, and Esc returns to the whole river.
-- **Implementation in progress: filtering by tag** (see [below](#v02--filtering-by-tag)).
+  `/` filters the river by one tag, and Esc returns to the whole river. A colored column shows each
+  post's tags (uncommitted).
+- **Implementation in progress: the tag column** (see [below](#v02--filtering-by-tag)).
   Implemented and verified, but not yet reviewed or committed.
-- **Last verification (tag filters):**
+- **Last verification (tag filters and the tag column):**
   - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
   - in a real pseudo-terminal (tmux, 90×22) with empty XDG directories and three local HTTP feeds
     tagged `tech`, `news` + `Tech`, and none: `/` listed All posts, tech, and news, starting on tech.
@@ -25,10 +26,12 @@ work status and sequencing. Proposals here are not settled decisions until recor
     Reading upward and pressing Esc returned to the `misc` post. New posts pulled inside the filter
     showed only tagged feeds' posts. After reading them in the filter, quitting, and relaunching,
     "You left off here" stayed below all the new posts. At 30×9 the picker fit, and `q` closed it
-    without quitting.
+    without quitting. A second run (90×14) showed the tag column, `tech` in cyan and `news` in
+    magenta (`newswire`'s `Tech` drawn as `tech`), the selected row's tags uncolored inside its
+    reverse video, and no colors with `NO_COLOR=1`.
 - **Next action:** the user reviews the change. Suggested commit:
-  `feat(tui): filter the river by tag with /`. Then decide whether adding feeds and tag filters ship
-  as `v0.2.0`.
+  `feat(tui): show each post's tags in a colored column`. Then decide whether adding feeds, tag
+  filters, and the tag column ship as `v0.2.0`.
 
 ### Keeping this useful
 
@@ -379,11 +382,14 @@ set the store already selects by.
 - [x] `reader.Query.Tag` and `Reader.Tags`, matching tags ignoring case and surrounding space.
 - [x] TUI: window reads as values carrying their tag, the picker, Esc, the `#tag` header, the empty
   filtered view, and no reaching while filtered.
+- [x] Tag column (user decisions, 2026-10-14: its own column after the name, all of a feed's tags,
+  and a color per tag). `reader.Item.FeedTags` and `Reader.Feeds` carry tags as `Tags` spells them.
 - [x] README, `AGENTS.md`, and real-terminal verification.
 
 **Acceptance coverage:**
 
-- `internal/reader/reader_test.go`: `Tags` once each, in config order, as first spelled, skipping
+- `internal/reader/reader_test.go`: item and `Feeds` tags once each, as `Tags` spells them, and
+  copied, so modifying a result or New's input changes nothing; `Tags` once each, in config order, as first spelled, skipping
   blanks, and copied; filtered pages older and newer for several spellings, an unknown tag, and a
   blank one; the whole river unchanged; a subscription's tags joining both.
 - `internal/tui/filter_test.go`: the picker lists and sanitizes tags, starts on the first or the
@@ -395,7 +401,12 @@ set the store already selects by.
   returns to the whole river's place, where moving reaches again. A filter applied during the launch
   read still resumes, and Esc then opens at the divider. Refreshes and a new subscription land in the
   filtered river. An empty filtered view says so, and a failed filter read is retried by the next move.
-- `internal/tui/tui_test.go`: existing tests now reach the resume through `windowRead`.
+- `internal/tui/filter_test.go` (tag column): exact rows for one, two, and no tags; each tag in its
+  palette color, uncolored in the selected row, and in the picker and the `#tag` header; the column
+  kept in a filtered view. It is capped with "…", sanitized, shown at 57 columns and dropped at 56
+  and 20, with every line fitting. It is absent without tags and appears when a tagged feed is added.
+- `internal/tui/tui_test.go`: existing tests now reach the resume through `windowRead`, and an
+  untagged river renders exactly as before.
 
 ## Open design questions
 

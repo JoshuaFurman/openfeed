@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -50,6 +51,9 @@ func TestTagPicker(t *testing.T) {
 	}
 	if strings.Contains(m.View().Content, "\x1b[2J") {
 		t.Error("a tag reached the terminal unsanitized")
+	}
+	if !strings.Contains(m.View().Content, lipgloss.NewStyle().Foreground(lipgloss.Magenta).Render("tech")) {
+		t.Error("the picker does not draw tech in its color, the second in config order")
 	}
 	press(t, m, "j")
 	if got := choices(m); !slices.Equal(got, []string{"All posts", "friends [2J", "▸ tech", "news"}) || m.cursor != 0 {
@@ -244,4 +248,91 @@ func TestFailedFilterReadRetriesTheFilter(t *testing.T) {
 	if m.tag != "tech" || len(m.rows) != 5 {
 		t.Errorf("the retry read %q with %d posts, want the tech filter", m.tag, len(m.rows))
 	}
+}
+
+func TestTagColumn(t *testing.T) {
+	tags := map[string][]string{"alpha": {"tech"}, "beta": {"news", "Tech"}}
+	river, _ := seedTagged(t, tags, []post{
+		{"alpha", "a1", "https://a.example/1", time.Minute},
+		{"beta", "b1", "https://b.example/1", 2 * time.Minute},
+		{"gamma", "g1", "https://g.example/1", 3 * time.Minute},
+	})
+	m := start(t, river, 80, 6, noOpen(t))
+	want := []string{
+		"▸ 1m        alpha  tech        a1",
+		"  2m        beta   news, tech  b1",
+		"  3m        gamma              g1",
+	}
+	if got := screen(m)[1:4]; !slices.Equal(trimmed(got), want) {
+		t.Errorf("river:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	tech := lipgloss.NewStyle().Foreground(lipgloss.Cyan).Render("tech")
+	news := lipgloss.NewStyle().Foreground(lipgloss.Magenta).Render("news")
+	lines := strings.Split(m.View().Content, "\n")
+	if !strings.Contains(lines[2], news+", "+tech) {
+		t.Errorf("beta's row %q does not color news and tech apart", lines[2])
+	}
+	if strings.Contains(lines[1], tech) {
+		t.Errorf("the selected row %q colors its tags, which would end its highlight", lines[1])
+	}
+	press(t, m, "j")
+	if lines = strings.Split(m.View().Content, "\n"); !strings.Contains(lines[1], tech) {
+		t.Errorf("alpha's row %q, no longer selected, does not color tech", lines[1])
+	}
+
+	press(t, m, "/", "enter")
+	if header := strings.Split(m.View().Content, "\n")[0]; !strings.Contains(header, lipgloss.NewStyle().Foreground(lipgloss.Cyan).Render("#tech")) {
+		t.Errorf("header %q does not show the filter in its tag's color", header)
+	}
+	kept := []string{"  1m        alpha  tech        a1", "▸ 2m        beta   news, tech  b1"} // Still on b1.
+	if got := trimmed(screen(m)[1:3]); !slices.Equal(got, kept) {
+		t.Errorf("filtered river = %q, want the tag column kept", got)
+	}
+}
+
+func TestTagColumnWidth(t *testing.T) {
+	river, _ := seedTagged(t, map[string][]string{"alpha": {"technology", "programming"}, "beta": {"x\x1b[2J"}}, mixed(2))
+	for _, test := range []struct {
+		width int
+		shown bool
+	}{{80, true}, {57, true}, {56, false}, {20, false}} {
+		m := start(t, river, test.width, 5, noOpen(t))
+		press(t, m, "j") // Leave the first row, so the column is drawn in color.
+		rows := strings.Join(screen(m)[1:3], "\n")
+		if shown := strings.Contains(rows, "technology, pro…"); shown != test.shown {
+			t.Errorf("width %d: column shown %v, want %v, capped at %d cells:\n%s", test.width, shown, test.shown, maxTagWidth, rows)
+		}
+		for _, line := range screen(m) {
+			if w := ansi.StringWidth(line); w > test.width {
+				t.Errorf("width %d: line %q is %d cells", test.width, line, w)
+			}
+		}
+		if test.shown && (!strings.Contains(rows, "x [2J") || strings.Contains(m.View().Content, "\x1b[2J")) {
+			t.Errorf("width %d: a tag reached the terminal unsanitized:\n%s", test.width, rows)
+		}
+	}
+
+	untagged, fetch := seed(t, numbered(2))
+	m := start(t, untagged, 80, 6, noOpen(t))
+	if m.tagColumn() != 0 {
+		t.Errorf("without tags, the tag column is %d cells", m.tagColumn())
+	}
+	fetch.serve("delta", fresh("d", "delta post", 10*time.Second))
+	press(t, m, "n")
+	typeText(t, m, feedURL("delta"))
+	press(t, m, "tab", "tab")
+	typeText(t, m, "news, video")
+	press(t, m, "enter", "j")
+	if got := strings.TrimRight(screen(m)[1], " "); got != "  now       delta.example  news, video  delta post" {
+		t.Errorf("after subscribing a tagged feed, its row = %q, want a tag column", got)
+	}
+}
+
+func trimmed(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = strings.TrimRight(line, " ")
+	}
+	return out
 }

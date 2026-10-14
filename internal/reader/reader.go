@@ -35,10 +35,11 @@ type Subscriptions interface {
 	Add(feed config.Feed) (config.Feed, error)
 }
 
-// Item is a cached post labeled with its subscription's configured name.
+// Item is a cached post labeled with its subscription's configured name and tags.
 type Item struct {
 	store.TimelineItem
 	FeedName string
+	FeedTags []string // In config order, each once and spelled as Tags lists it.
 }
 
 // Query selects river positions strictly older than Before and no older than Through, or else the posts
@@ -80,17 +81,23 @@ type Reader struct {
 
 // feedSet is the configured subscriptions, in config order, with what reads and rounds derive from them.
 type feedSet struct {
-	feeds  []config.Feed
-	hosts  []string // Request-slot key for each feed.
+	feeds  []config.Feed // Tags rewritten as tags spells them, each once.
+	hosts  []string      // Request-slot key for each feed.
 	urls   []string
 	names  map[string]string
+	labels map[string][]string // Tags by URL, as feeds holds them.
 	tags   []string            // Distinct tags in config order, as first spelled.
 	tagged map[string][]string // URLs by tagKey.
 }
 
+// newFeedSet derives a set from feeds, which it owns and modifies.
 func newFeedSet(feeds []config.Feed) *feedSet {
-	set := &feedSet{feeds: feeds, names: make(map[string]string, len(feeds)), tagged: make(map[string][]string)}
-	for _, f := range feeds {
+	set := &feedSet{
+		feeds: feeds, names: make(map[string]string, len(feeds)),
+		labels: make(map[string][]string, len(feeds)), tagged: make(map[string][]string),
+	}
+	spelled := make(map[string]string) // First spelling by tagKey.
+	for i, f := range feeds {
 		host := f.URL
 		if u, err := url.Parse(f.URL); err == nil {
 			host = u.Hostname()
@@ -98,16 +105,23 @@ func newFeedSet(feeds []config.Feed) *feedSet {
 		set.hosts = append(set.hosts, host)
 		set.urls = append(set.urls, f.URL)
 		set.names[f.URL] = f.Name
+		var tags []string
 		for _, tag := range f.Tags {
 			key := tagKey(tag)
 			if key == "" {
 				continue
 			}
-			if set.tagged[key] == nil {
-				set.tags = append(set.tags, strings.TrimSpace(tag))
+			if _, ok := spelled[key]; !ok {
+				spelled[key] = strings.TrimSpace(tag)
+				set.tags = append(set.tags, spelled[key])
 			}
-			set.tagged[key] = append(set.tagged[key], f.URL)
+			if !slices.Contains(tags, spelled[key]) {
+				tags = append(tags, spelled[key])
+				set.tagged[key] = append(set.tagged[key], f.URL)
+			}
 		}
+		feeds[i].Tags = tags
+		set.labels[f.URL] = tags
 	}
 	return set
 }
@@ -138,8 +152,15 @@ func (r *Reader) current() *feedSet {
 	return r.set
 }
 
-// Feeds lists the configured subscriptions in config order; the caller may modify the result.
-func (r *Reader) Feeds() []config.Feed { return slices.Clone(r.current().feeds) }
+// Feeds lists the configured subscriptions in config order, with tags as Items carry them.
+// The caller may modify the result.
+func (r *Reader) Feeds() []config.Feed {
+	feeds := slices.Clone(r.current().feeds)
+	for i := range feeds {
+		feeds[i].Tags = slices.Clone(feeds[i].Tags)
+	}
+	return feeds
+}
 
 // Tags lists the subscriptions' distinct tags in config order, each as first spelled, for Query.Tag.
 // The caller may modify the result.
@@ -208,7 +229,7 @@ func (r *Reader) Timeline(ctx context.Context, query Query) (Page, error) {
 	}
 	items := make([]Item, len(page.Items))
 	for i, item := range page.Items {
-		items[i] = Item{TimelineItem: item, FeedName: set.names[item.FeedURL]}
+		items[i] = Item{TimelineItem: item, FeedName: set.names[item.FeedURL], FeedTags: slices.Clone(set.labels[item.FeedURL])}
 	}
 	return Page{Items: items, Next: page.Next, Newer: page.Newer}, nil
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
@@ -11,15 +12,24 @@ import (
 )
 
 const (
-	ageWidth = 8 // Fits "Jan 2006", the widest age.
-	title    = " openfeed"
-	hints    = "j/k move · g newest · o open · / tag · n add · q quit "
+	ageWidth     = 8 // Fits "Jan 2006", the widest age.
+	tagSeparator = ", "
+	title        = " openfeed"
+	hints        = "j/k move · g newest · o open · / tag · n add · q quit "
 )
 
 var (
 	headerStyle   = lipgloss.NewStyle().Bold(true)
 	selectedStyle = lipgloss.NewStyle().Reverse(true)
 	dimStyle      = lipgloss.NewStyle().Faint(true)
+
+	// tagPalette colors tags in config order from the terminal's own 16 colors, which follow its theme.
+	// It leaves out black, white, and the grays, as one of them is always close to the background.
+	tagPalette = []color.Color{
+		lipgloss.Cyan, lipgloss.Magenta, lipgloss.Yellow, lipgloss.Green, lipgloss.Blue, lipgloss.Red,
+		lipgloss.BrightCyan, lipgloss.BrightMagenta, lipgloss.BrightYellow, lipgloss.BrightGreen,
+		lipgloss.BrightBlue, lipgloss.BrightRed,
+	}
 )
 
 func (m *model) View() tea.View {
@@ -67,7 +77,7 @@ func (m *model) View() tea.View {
 		box, cursor := m.form.view(m.spinner.View())
 		view.Content, view.Cursor = m.overlay(view.Content, box, cursor)
 	case m.picker != nil:
-		view.Content, _ = m.overlay(view.Content, m.picker.view(m.formWidth(), m.height), nil)
+		view.Content, _ = m.overlay(view.Content, m.picker.view(m.formWidth(), m.height, m.tagStyle), nil)
 	}
 	view.AltScreen = true
 	return view
@@ -99,7 +109,7 @@ func (m *model) dividerLine() string {
 func (m *model) header() string {
 	left := headerStyle.Render(title)
 	if m.tag != "" {
-		left += " #" + Sanitize(m.tag)
+		left += " " + m.tagStyle(Sanitize(m.tag)).Render("#"+Sanitize(m.tag))
 	}
 	if m.refreshing {
 		left += " " + m.spinner.View() + dimStyle.Render(" refreshing")
@@ -113,20 +123,57 @@ func (m *model) header() string {
 
 func (m *model) row(i int) string {
 	r := m.rows[i]
+	selected := i == m.cursor
 	marker := "  "
-	if i == m.cursor {
+	if selected {
 		marker = "▸ "
 	}
 	text := r.title
 	if text == "" {
 		text = "(untitled)"
 	}
-	line := fit(marker+pad(age(r.date, m.now()), ageWidth)+"  "+
-		pad(ansi.Truncate(r.feed, m.nameWidth, "…"), m.nameWidth)+"  "+text, m.width)
-	if i == m.cursor {
+	line := marker + pad(age(r.date, m.now()), ageWidth) + "  " +
+		pad(ansi.Truncate(r.feed, m.nameWidth, "…"), m.nameWidth) + "  "
+	if width := m.tagColumn(); width > 0 {
+		line += pad(ansi.Truncate(m.tagList(r.tags, selected), width, "…"), width) + "  "
+	}
+	line = fit(line+text, m.width)
+	if selected {
 		return selectedStyle.Render(pad(line, m.width))
 	}
 	return line
+}
+
+// tagColumn is the tag column's width: zero when no feed has tags, or when the terminal is too narrow to
+// keep minTitle cells of each title beside it.
+func (m *model) tagColumn() int {
+	before := 2 + ageWidth + 2 + m.nameWidth + 2 // The marker, the age, and the name, each with its gap.
+	if m.tagWidth == 0 || (m.width > 0 && m.width-before-m.tagWidth-2 < minTitle) {
+		return 0
+	}
+	return m.tagWidth
+}
+
+// tagList joins tags, each in its color unless plain. The selected row draws them plain, because a
+// color's reset would end its highlight.
+func (m *model) tagList(tags []string, plain bool) string {
+	if plain {
+		return strings.Join(tags, tagSeparator)
+	}
+	painted := make([]string, len(tags))
+	for i, tag := range tags {
+		painted[i] = m.tagStyle(tag).Render(tag)
+	}
+	return strings.Join(painted, tagSeparator)
+}
+
+// tagStyle colors text as a sanitized tag; an unknown tag stays plain.
+func (m *model) tagStyle(tag string) lipgloss.Style {
+	style := lipgloss.NewStyle()
+	if c, ok := m.tagColors[tag]; ok {
+		style = style.Foreground(c)
+	}
+	return style
 }
 
 // status names the launch failures; one failure shows its reason, and more point to the log.

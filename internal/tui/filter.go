@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -56,8 +57,9 @@ func (m *model) pickerKey(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// view renders the picker at most width cells wide and, given a height, scrolled to fit it.
-func (p *tagPicker) view(width, height int) string {
+// view renders the picker at most width cells wide and, given a height, scrolled to fit it, with each
+// unselected tag in its style.
+func (p *tagPicker) view(width, height int, style func(tag string) lipgloss.Style) string {
 	frame := formStyle.GetHorizontalFrameSize()
 	inner := max(ansi.StringWidth(pickerTitle), ansi.StringWidth(pickerHints))
 	for _, tag := range p.tags {
@@ -74,13 +76,14 @@ func (p *tagPicker) view(width, height int) string {
 	lines := []string{headerStyle.Render(fit(pickerTitle, inner)), ""}
 	for i := first; i < first+shown; i++ {
 		label := Sanitize(p.tags[i])
+		painted := style(label).Render(label)
 		if label == "" {
-			label = allPosts
+			label, painted = allPosts, allPosts
 		}
 		if i == p.cursor {
 			lines = append(lines, selectedStyle.Render(pad(fit("▸ "+label, inner), inner)))
 		} else {
-			lines = append(lines, fit("  "+label, inner))
+			lines = append(lines, fit("  "+painted, inner))
 		}
 	}
 	lines = append(lines, "", dimStyle.Render(fit(pickerHints, inner)))

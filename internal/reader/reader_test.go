@@ -321,8 +321,32 @@ func TestTagFilters(t *testing.T) {
 			t.Errorf("tag %q: older pages %v, newer pages %v; want %v", test.tag, down, up, test.want)
 		}
 	}
-	if got := titles(river(t, r)); len(got) != 5 {
+	all := river(t, r)
+	if got := titles(all); len(got) != 5 {
 		t.Errorf("unfiltered river = %v, want every configured feed", got)
+	}
+	labels := map[string][]string{}
+	for _, item := range all {
+		labels[item.FeedName] = item.FeedTags
+	}
+	want := map[string][]string{"alpha": {"Tech", "news"}, "beta": {"Tech"}, "gamma": {"friends"}, "delta": nil}
+	if !reflect.DeepEqual(labels, want) {
+		t.Errorf("item tags = %q, want each feed's once, spelled as Tags lists them", labels)
+	}
+	all[0].FeedTags[0] = "changed"
+	feeds[0].Tags[0] = "changed" // The configuration New was given.
+	configured := r.Feeds()
+	if !slices.Equal(configured[0].Tags, []string{"Tech", "news"}) || configured[3].Tags != nil {
+		t.Errorf("Feeds tags = %q and %q, want them as items carry them", configured[0].Tags, configured[3].Tags)
+	}
+	configured[0].Tags[0] = "changed"
+	if got := titles(river(t, r)); got[0] != "a-new@alpha" || r.Feeds()[0].Tags[0] != "Tech" {
+		t.Errorf("modifying results changed the reader: %v, %q", got, r.Feeds()[0].Tags)
+	}
+	for _, item := range river(t, r) {
+		if item.FeedName == "alpha" && item.FeedTags[0] != "Tech" {
+			t.Errorf("modifying an item's tags changed the next read: %q", item.FeedTags)
+		}
 	}
 
 	if _, err := r.Subscribe(t.Context(), config.Feed{URL: "https://e.example/rx", Name: "epsilon", Tags: []string{"tech", "Video"}}); err != nil {

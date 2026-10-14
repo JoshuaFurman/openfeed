@@ -94,7 +94,9 @@ the last 30 seconds is not fetched again, but the pull still shows its spinner. 
 hides posts that are already cached; the status line says why it failed, and the log has the
 details.
 
-Press `/` to read only one tag's feeds. It lists your tags, with `Tech` and `tech` counting as one, and
+When any feed has tags, each post shows its feed's tags in their own column, each tag in a color of its
+own, so you can pick out a topic at a glance. Set `NO_COLOR=1` to turn the colors off. Press `/` to
+read only one tag's feeds. It lists your tags, with `Tech` and `tech` counting as one, and
 the header shows the filter, as in `openfeed #tech`. The filter keeps your place in time, and Esc
 returns you to where you were in the whole river. Reading in a filtered view never moves "You left off
 here", because it passes over posts the filter hides.
