@@ -9,23 +9,26 @@ work status and sequencing. Proposals here are not settled decisions until recor
 - **Completed:** v0.1's read-only river, released as `v0.1.0`: configuration, feed fetching, the
   SQLite store, reader orchestration, command wiring, and the TUI river with refresh and resuming where
   the reader left off. Settled decisions and contracts are in `AGENTS.md`.
+  Adding feeds in the TUI is committed (`b919f54`).
 - **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
   "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
   a double-tap of `k`/↑ at the newest post, and saves the furthest reached position. `n` adds a feed
   from a popup; a first launch with no subscriptions opens the empty river and says to press `n`.
-- **Implementation in progress: adding feeds in the TUI** (see [below](#v02--adding-feeds-in-the-tui)).
+  `/` filters the river by one tag, and Esc returns to the whole river.
+- **Implementation in progress: filtering by tag** (see [below](#v02--filtering-by-tag)).
   Implemented and verified, but not yet reviewed or committed.
-- **Last verification (adding feeds):**
-  - formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`, `go mod verify`, and
-    `go mod tidy -diff`;
-  - in a real pseudo-terminal (tmux, 90×22) with empty XDG directories and a local HTTP feed: the
-    first launch opened "No subscriptions yet. Press n to add a feed."; `n` opened the popup with the
-    terminal cursor in the URL field; an HTML page showed "parse feed …: failed to detect feed type"
-    wrapped in the popup; correcting the URL, Tab to a name and tags, and Enter showed the feed's posts
-    and "Subscribed to local."; the starter config kept its comments with the block appended. Typing
-    `qqq` into a popup did not quit, Esc closed it, `q` exited 0, and a relaunch read the subscription.
+- **Last verification (tag filters):**
+  - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
+  - in a real pseudo-terminal (tmux, 90×22) with empty XDG directories and three local HTTP feeds
+    tagged `tech`, `news` + `Tech`, and none: `/` listed All posts, tech, and news, starting on tech.
+    From a `misc` post, Enter showed `#tech` with the cursor on the newest tagged post below it.
+    Reading upward and pressing Esc returned to the `misc` post. New posts pulled inside the filter
+    showed only tagged feeds' posts. After reading them in the filter, quitting, and relaunching,
+    "You left off here" stayed below all the new posts. At 30×9 the picker fit, and `q` closed it
+    without quitting.
 - **Next action:** the user reviews the change. Suggested commit:
-  `feat(tui): add feeds from a popup with n`. Then decide whether it ships as `v0.2.0`.
+  `feat(tui): filter the river by tag with /`. Then decide whether adding feeds and tag filters ship
+  as `v0.2.0`.
 
 ### Keeping this useful
 
@@ -364,6 +367,36 @@ subscriptions, and append to `config.toml`. Recorded in [`AGENTS.md`](AGENTS.md#
 - `cmd/openfeed/main_test.go`: a first launch presents the empty river, and subscribing through it
   appends to the real starter config and shows the post.
 
+## v0.2 — filtering by tag
+
+`/` opens a picker of the configured tags and "All posts". Approved design (user decisions,
+2026-10-14): a list picker rather than typing or cycling, one tag at a time, and Esc or "All posts"
+to clear. Applying a tag keeps the place in time; clearing returns to where the whole river was left.
+Recorded in [`AGENTS.md`](AGENTS.md#2-decisions-made) (Tag filters) and
+[Filtering by tag](AGENTS.md#filtering-by-tag). No store or schema change: the reader narrows the URL
+set the store already selects by.
+
+- [x] `reader.Query.Tag` and `Reader.Tags`, matching tags ignoring case and surrounding space.
+- [x] TUI: window reads as values carrying their tag, the picker, Esc, the `#tag` header, the empty
+  filtered view, and no reaching while filtered.
+- [x] README, `AGENTS.md`, and real-terminal verification.
+
+**Acceptance coverage:**
+
+- `internal/reader/reader_test.go`: `Tags` once each, in config order, as first spelled, skipping
+  blanks, and copied; filtered pages older and newer for several spellings, an unknown tag, and a
+  blank one; the whole river unchanged; a subscription's tags joining both.
+- `internal/tui/filter_test.go`: the picker lists and sanitizes tags, starts on the first or the
+  active tag, stops at both ends, and keeps keys from the river. Esc and `q` close it, Ctrl-C quits,
+  and with no tags it shows a notice instead. It fits 80, 40, 20, and 12 columns, scrolling to keep
+  the choice in sight. Filtering pages through every tagged post once; Esc returns where the river was
+  left, and a second Esc does nothing. A filter opens below the cursor's post with the divider in
+  place. Moves, `g`, and `o` while filtered reach nothing; switching tags keeps the place, and Esc then
+  returns to the whole river's place, where moving reaches again. A filter applied during the launch
+  read still resumes, and Esc then opens at the divider. Refreshes and a new subscription land in the
+  filtered river. An empty filtered view says so, and a failed filter read is retried by the next move.
+- `internal/tui/tui_test.go`: existing tests now reach the resume through `windowRead`.
+
 ## Open design questions
 
 Resolve a question before the work it affects, not every future question up front.
@@ -383,6 +416,7 @@ Resolve a question before the work it affects, not every future question up fron
 - [ ] Removing and renaming subscriptions in the app, and OPML import/export, after solving TOML
   round-tripping. Adding is done (`n`).
 - [ ] FTS5 search.
-- [ ] Feed/tag filters over the same river.
+- [ ] Feed filters over the same river. Tag filters are done (`/`); a feed filter could join the same
+  picker and `Query`.
 - [ ] `openfeed serve`: localhost UI using the same core, embedded templates, and htmx.
 - [ ] Optional AI features behind the provider seam; no real providers until reading is solid.

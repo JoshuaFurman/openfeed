@@ -242,6 +242,100 @@ func TestTimelineLabelsAndSelection(t *testing.T) {
 	}
 }
 
+// tagged reads every post carrying tag, a page at a time, older and then back up.
+func tagged(t *testing.T, r *Reader, tag string) (down, up []string) {
+	t.Helper()
+	var items []Item
+	for query := (Query{Tag: tag, Limit: 1}); len(items) <= 100; {
+		page, err := r.Timeline(t.Context(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, page.Items...)
+		if page.Next == nil {
+			break
+		}
+		query.Before = page.Next
+	}
+	if len(items) < 2 {
+		return titles(items), titles(items)
+	}
+	upward := items[len(items)-1:]
+	for query := (Query{Tag: tag, After: &upward[0].Position, Limit: 1}); len(upward) <= 100; {
+		page, err := r.Timeline(t.Context(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upward = append(slices.Clone(page.Items), upward...)
+		if page.Newer == nil {
+			break
+		}
+		query.After = page.Newer
+	}
+	return titles(items), titles(upward)
+}
+
+func TestTagFilters(t *testing.T) {
+	at := time.Date(2025, 9, 1, 0, 0, 0, 0, time.UTC)
+	feeds := []config.Feed{
+		{URL: "https://a.example/feed", Name: "alpha", Tags: []string{"Tech", "news", "TECH"}},
+		{URL: "https://b.example/feed", Name: "beta", Tags: []string{" tech ", " "}},
+		{URL: "https://c.example/feed", Name: "gamma", Tags: []string{"friends"}},
+		{URL: "https://d.example/feed", Name: "delta"},
+	}
+	r, _, c := newReader(t, feeds, nil)
+	fetch, _ := countingFetches(c, map[string][]feed.Item{
+		feeds[0].URL:           {post("a-new", at.Add(5*time.Hour)), post("a-old", at.Add(time.Hour))},
+		feeds[1].URL:           {post("b-mid", at.Add(3*time.Hour))},
+		feeds[2].URL:           {post("c", at.Add(4*time.Hour))},
+		feeds[3].URL:           {post("d", at.Add(2*time.Hour))},
+		"https://e.example/rx": {post("e", at.Add(6*time.Hour))},
+	})
+	r.fetcher = fetch
+	r.subs = &memorySubs{}
+	refresh(t, r)
+
+	listed := r.Tags()
+	if !slices.Equal(listed, []string{"Tech", "news", "friends"}) {
+		t.Errorf("Tags = %q, want each once, in config order, as first spelled", listed)
+	}
+	listed[0] = "changed"
+	if got := r.Tags(); got[0] != "Tech" {
+		t.Errorf("Tags = %q after modifying a copy", got)
+	}
+
+	tech := []string{"a-new@alpha", "b-mid@beta", "a-old@alpha"}
+	for _, test := range []struct {
+		tag  string
+		want []string
+	}{
+		{"tech", tech},
+		{" TECH ", tech},
+		{"news", []string{"a-new@alpha", "a-old@alpha"}},
+		{"friends", []string{"c@gamma"}},
+		{"missing", nil},
+		{" ", nil},
+	} {
+		down, up := tagged(t, r, test.tag)
+		if !slices.Equal(down, test.want) || !slices.Equal(up, test.want) {
+			t.Errorf("tag %q: older pages %v, newer pages %v; want %v", test.tag, down, up, test.want)
+		}
+	}
+	if got := titles(river(t, r)); len(got) != 5 {
+		t.Errorf("unfiltered river = %v, want every configured feed", got)
+	}
+
+	if _, err := r.Subscribe(t.Context(), config.Feed{URL: "https://e.example/rx", Name: "epsilon", Tags: []string{"tech", "Video"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Tags(); !slices.Equal(got, []string{"Tech", "news", "friends", "Video"}) {
+		t.Errorf("Tags after subscribing = %q, want the new tag last", got)
+	}
+	if down, _ := tagged(t, r, "tech"); !slices.Equal(down, append([]string{"e@epsilon"}, tech...)) {
+		t.Errorf("tech after subscribing = %v, want the new feed's post", down)
+	}
+}
+
 func TestSeenBookkeeping(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openfeed.db")
 	at := time.Date(2025, 9, 1, 0, 0, 0, 0, time.UTC)

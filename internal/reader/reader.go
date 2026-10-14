@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,7 +43,9 @@ type Item struct {
 
 // Query selects river positions strictly older than Before and no older than Through, or else the posts
 // nearest above After, which cannot combine with the others. Nil boundaries are unrestricted.
+// A traversal keeps one Tag; positions from another still compare in river order.
 type Query struct {
+	Tag     string // Narrows the river to subscriptions carrying it, ignoring case; empty selects all.
 	Before  *Position
 	Through *Position
 	After   *Position
@@ -77,14 +80,16 @@ type Reader struct {
 
 // feedSet is the configured subscriptions, in config order, with what reads and rounds derive from them.
 type feedSet struct {
-	feeds []config.Feed
-	hosts []string // Request-slot key for each feed.
-	urls  []string
-	names map[string]string
+	feeds  []config.Feed
+	hosts  []string // Request-slot key for each feed.
+	urls   []string
+	names  map[string]string
+	tags   []string            // Distinct tags in config order, as first spelled.
+	tagged map[string][]string // URLs by tagKey.
 }
 
 func newFeedSet(feeds []config.Feed) *feedSet {
-	set := &feedSet{feeds: feeds, names: make(map[string]string, len(feeds))}
+	set := &feedSet{feeds: feeds, names: make(map[string]string, len(feeds)), tagged: make(map[string][]string)}
 	for _, f := range feeds {
 		host := f.URL
 		if u, err := url.Parse(f.URL); err == nil {
@@ -93,9 +98,22 @@ func newFeedSet(feeds []config.Feed) *feedSet {
 		set.hosts = append(set.hosts, host)
 		set.urls = append(set.urls, f.URL)
 		set.names[f.URL] = f.Name
+		for _, tag := range f.Tags {
+			key := tagKey(tag)
+			if key == "" {
+				continue
+			}
+			if set.tagged[key] == nil {
+				set.tags = append(set.tags, strings.TrimSpace(tag))
+			}
+			set.tagged[key] = append(set.tagged[key], f.URL)
+		}
 	}
 	return set
 }
+
+// tagKey is the form in which tags match, so case and surrounding space never split one tag in two.
+func tagKey(tag string) string { return strings.ToLower(strings.TrimSpace(tag)) }
 
 // New serves feeds from st, refreshing them through fetcher, and records Subscribe's additions in subs.
 // Feeds must satisfy config.Load's invariants; a nil logger discards failures.
@@ -122,6 +140,10 @@ func (r *Reader) current() *feedSet {
 
 // Feeds lists the configured subscriptions in config order; the caller may modify the result.
 func (r *Reader) Feeds() []config.Feed { return slices.Clone(r.current().feeds) }
+
+// Tags lists the subscriptions' distinct tags in config order, each as first spelled, for Query.Tag.
+// The caller may modify the result.
+func (r *Reader) Tags() []string { return slices.Clone(r.current().tags) }
 
 // Subscribe checks that f fetches as a feed, appends it to the configuration, and adds it to the river
 // with the posts it fetched. A failure leaves the configuration and river as they were.
@@ -170,12 +192,16 @@ func (r *Reader) unsubscribed(feedURL string) error {
 	return nil
 }
 
-// Timeline reads one page of the river across every configured subscription.
+// Timeline reads one page of the river across every configured subscription, or those tagged query.Tag.
 // Calls do not share a snapshot; refreshes and date corrections can move posts between pages.
 func (r *Reader) Timeline(ctx context.Context, query Query) (Page, error) {
 	set := r.current()
+	urls := set.urls
+	if query.Tag != "" {
+		urls = set.tagged[tagKey(query.Tag)] // An unknown tag selects nothing.
+	}
 	page, err := r.store.Timeline(ctx, store.TimelineQuery{
-		FeedURLs: set.urls, Before: query.Before, Through: query.Through, After: query.After, Limit: query.Limit,
+		FeedURLs: urls, Before: query.Before, Through: query.Through, After: query.After, Limit: query.Limit,
 	})
 	if err != nil {
 		return Page{}, err

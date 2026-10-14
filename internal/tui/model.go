@@ -41,13 +41,21 @@ func newRow(item reader.Item) row {
 	}
 }
 
+// windowRead is a read that replaces the window, kept so that a supersede or retry reruns the same read.
+type windowRead struct {
+	tag    string           // The filter it reads; empty for the whole river.
+	at     *reader.Position // The window opens around this position; nil opens at the newest post.
+	resume bool             // Reads the saved position as at, which becomes the session's divider.
+	jump   bool             // g, which reaches the newest post once it loads.
+}
+
 // Page messages carry the request or window generation they belong to, so superseded results are dropped.
 type (
 	windowLoaded struct {
+		read         windowRead
 		items        []reader.Item
 		older, newer *reader.Position
-		at           *reader.Position // The saved position a resume read placed the window at; nil otherwise.
-		jump         bool             // Loaded by g, which reaches the newest post.
+		at           *reader.Position // Where the window opened; the saved position for a resume.
 		err          error
 		request      int
 	}
@@ -73,8 +81,9 @@ type (
 	}
 	seenIdle struct{ reach int }
 	opened   struct {
-		err error
-		row row
+		err      error
+		row      row
+		filtered bool // Opened from a filtered view, so it is not reached.
 	}
 	ageTick struct{}
 )
@@ -93,14 +102,16 @@ type model struct {
 	minSpin   time.Duration // Shortest visible refresh.
 	saveDelay time.Duration // Idle time before saving the reading position; zero never schedules a save.
 
-	window        int                 // Generation of the loaded span.
-	headRequest   int                 // Latest head read; earlier ones are dropped.
-	headPending   bool                // The latest window read has not arrived.
-	pendingRead   func() windowLoaded // That read, which a supersede or retry reruns; nil once it lands.
-	placePending  bool                // The resume placement awaits the terminal size.
-	reloading     bool                // A span reload is in flight; at most one runs at a time.
-	reloadAgain   bool                // A refresh finished during the reload in flight.
-	reloadFailed  bool                // The last span reload failed; the next move retries it.
+	window        int              // Generation of the loaded span.
+	headRequest   int              // Latest head read; earlier ones are dropped.
+	headPending   bool             // The latest window read has not arrived.
+	pendingRead   *windowRead      // That read, which a supersede or retry reruns; nil once it lands.
+	placePending  bool             // The resume placement awaits the terminal size.
+	reloading     bool             // A span reload is in flight; at most one runs at a time.
+	reloadAgain   bool             // A refresh finished during the reload in flight.
+	reloadFailed  bool             // The last span reload failed; the next move retries it.
+	tag           string           // The loaded window's filter; empty for the whole river.
+	unfiltered    *reader.Position // Where the reader left the whole river for a filter; clearing returns there.
 	rows          []row
 	ids           map[reader.ItemID]bool
 	older, newer  *reader.Position // Continuations past each edge; nil newer means the window reaches the head.
@@ -123,6 +134,7 @@ type model struct {
 	notice        string              // Replaces the status line until the next key press.
 	form          *addForm            // The add-feed popup, while it shows.
 	forms         int                 // Popups opened, which tells each one's answer apart.
+	picker        *tagPicker          // The tag filter popup, while it shows.
 }
 
 func newModel(ctx context.Context, river River, open func(string) error, now func() time.Time) *model {
@@ -148,7 +160,9 @@ func (m *model) sizeNames() {
 }
 
 // Init resumes the cached river where the reader left off while the launch refresh runs.
-func (m *model) Init() tea.Cmd { return tea.Batch(m.readWindow(m.resumeRead), m.refresh(), m.tick) }
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(m.readWindow(windowRead{resume: true}), m.refresh(), m.tick)
+}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -165,8 +179,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		m.notice = ""
 		m.placePending = false // The reader has taken over the view.
-		if m.form != nil {
+		switch {
+		case m.form != nil:
 			return m, m.formKey(msg)
+		case m.picker != nil:
+			return m, m.pickerKey(msg)
 		}
 		return m, m.key(msg)
 	case ageTick:
@@ -206,13 +223,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.pendingRead = nil
-		if msg.at != nil {
-			m.divider = msg.at // Only a resume read carries the saved position; it is fixed for the session.
+		if msg.read.resume {
+			m.divider = msg.at // Read once, at launch; it is fixed for the session.
 		}
+		if msg.read.tag == "" {
+			m.unfiltered = nil // Back in the whole river.
+		}
+		m.tag = msg.read.tag
 		m.replace(msg.items, msg.older)
 		m.newer = msg.newer
 		m.place(msg.at)
-		if msg.jump && len(m.rows) > 0 {
+		if msg.read.jump && len(m.rows) > 0 {
 			return m, tea.Batch(m.reached(m.rows[0]), m.prefetch())
 		}
 		return m, m.prefetch()
@@ -262,7 +283,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "Could not open the article: " + msg.err.Error()
 			break
 		}
-		return m, m.reached(msg.row) // Only an article that opened counts as reached.
+		if !msg.filtered {
+			return m, m.reached(msg.row) // Only an article that opened counts as reached.
+		}
 	case subscribed:
 		return m, m.subscribed(msg)
 	default:
@@ -293,6 +316,11 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 	case "n":
 		m.openForm()
 		return nil
+	case "/":
+		m.openPicker()
+		return nil
+	case "esc":
+		return m.filter("")
 	}
 	if m.headFailed {
 		return m.loadHead() // Any move retries a launch read that failed.
@@ -312,7 +340,7 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	case "g", "home":
 		if m.newer != nil {
-			return m.readWindow(m.jumpRead) // The head is not loaded; replace the window with it.
+			return m.readWindow(windowRead{tag: m.tag, jump: true}) // The head is not loaded; replace the window with it.
 		}
 		m.cursor = 0
 	}
@@ -329,7 +357,11 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // reached records that the user navigated to posts and schedules saving once they pause.
+// A filtered view never reaches, because reading ahead in it passes over the posts it hides.
 func (m *model) reached(rows ...row) tea.Cmd {
+	if m.tag != "" {
+		return nil
+	}
 	for _, r := range rows {
 		m.river.Reached(r.position)
 	}
@@ -358,7 +390,8 @@ func (m *model) openSelected() tea.Cmd {
 		m.notice = "This post has no article link."
 		return nil
 	}
-	return func() tea.Msg { return opened{m.open(selected.url), selected} }
+	filtered := m.tag != ""
+	return func() tea.Msg { return opened{m.open(selected.url), selected, filtered} }
 }
 
 // pull refreshes on the second of two quick, separate taps at the newest post, so a stray press never does.
@@ -415,9 +448,9 @@ func (m *model) reload() tea.Cmd {
 	}
 	m.reloading, m.reloadFailed = true, false
 	bottom, window := m.rows[len(m.rows)-1].position, m.window
+	query := reader.Query{Tag: m.tag, Through: &bottom, Limit: reloadLimit}
 	return m.work(func() tea.Msg {
 		var items []reader.Item
-		query := reader.Query{Through: &bottom, Limit: reloadLimit}
 		for {
 			page, err := m.river.Timeline(m.ctx, query)
 			if err != nil {
@@ -505,79 +538,101 @@ func (m *model) prefetch() tea.Cmd {
 	var cmds []tea.Cmd
 	if m.older != nil && !m.loadingOlder && m.cursor >= len(m.rows)-prefetch {
 		m.loadingOlder = true
-		before, window := m.older, m.window
+		query, window := reader.Query{Tag: m.tag, Before: m.older}, m.window
 		cmds = append(cmds, m.work(func() tea.Msg {
-			page, err := m.river.Timeline(m.ctx, reader.Query{Before: before})
+			page, err := m.river.Timeline(m.ctx, query)
 			return olderLoaded{page, err, window}
 		}))
 	}
 	if m.newer != nil && !m.loadingNewer && m.cursor < prefetch {
 		m.loadingNewer = true
-		after, window := m.newer, m.window
+		query, window := reader.Query{Tag: m.tag, After: m.newer}, m.window
 		cmds = append(cmds, m.work(func() tea.Msg {
-			page, err := m.river.Timeline(m.ctx, reader.Query{After: after})
+			page, err := m.river.Timeline(m.ctx, query)
 			return newerLoaded{page, err, window}
 		}))
 	}
 	return tea.Batch(cmds...)
 }
 
-// loadHead rereads the window: the read still pending if any (the launch resume, or a jump), so a
+// loadHead rereads the window: the read still pending if any (the launch resume, a jump, or a filter), so a
 // supersede or retry keeps its purpose, and otherwise the newest posts.
 func (m *model) loadHead() tea.Cmd {
 	if m.pendingRead != nil {
-		return m.readWindow(m.pendingRead)
+		return m.readWindow(*m.pendingRead)
 	}
-	return m.readWindow(m.headRead)
+	return m.readWindow(windowRead{tag: m.tag})
 }
 
-// jumpRead reads the newest posts for g, which reaches the newest post once it loads.
-func (m *model) jumpRead() windowLoaded {
-	loaded := m.headRead()
-	loaded.jump = true
-	return loaded
-}
-
-func (m *model) readWindow(read func() windowLoaded) tea.Cmd {
+func (m *model) readWindow(read windowRead) tea.Cmd {
 	m.headRequest++
 	m.headPending = true
-	m.pendingRead = read
+	m.pendingRead = &read
 	request := m.headRequest
 	return m.work(func() tea.Msg {
-		loaded := read()
+		loaded := m.load(read)
 		loaded.request = request
 		return loaded
 	})
 }
 
-func (m *model) headRead() windowLoaded {
-	page, err := m.river.Timeline(m.ctx, reader.Query{})
-	return windowLoaded{items: page.Items, older: page.Next, err: err}
-}
-
-// resumeRead reads the saved position and the posts around it: the nearest newer page, then everything
-// at or below the oldest of those. With nothing newer, it is the head page.
-func (m *model) resumeRead() windowLoaded {
-	saved, err := m.river.SeenPosition(m.ctx)
-	if err != nil {
-		return windowLoaded{err: err}
+// load reads the posts around a window read's position: the nearest newer page, then everything at or
+// below the oldest of those. With nothing newer, or no position, it is the head page.
+func (m *model) load(read windowRead) windowLoaded {
+	loaded := windowLoaded{read: read, at: read.at}
+	if read.resume {
+		saved, err := m.river.SeenPosition(m.ctx)
+		if err != nil {
+			return windowLoaded{err: err}
+		}
+		loaded.at = saved
 	}
-	if saved == nil {
-		return m.headRead()
-	}
-	above, err := m.river.Timeline(m.ctx, reader.Query{After: saved})
-	if err != nil {
-		return windowLoaded{err: err}
-	}
-	below := reader.Query{}
-	if len(above.Items) > 0 {
-		below.Before = &above.Items[len(above.Items)-1].Position
+	var above reader.Page
+	below := reader.Query{Tag: read.tag}
+	if loaded.at != nil {
+		var err error
+		if above, err = m.river.Timeline(m.ctx, reader.Query{Tag: read.tag, After: loaded.at}); err != nil {
+			return windowLoaded{err: err}
+		}
+		if len(above.Items) > 0 {
+			below.Before = &above.Items[len(above.Items)-1].Position
+		}
 	}
 	page, err := m.river.Timeline(m.ctx, below)
 	if err != nil {
 		return windowLoaded{err: err}
 	}
-	return windowLoaded{items: append(above.Items, page.Items...), older: page.Next, newer: above.Newer, at: saved}
+	loaded.items, loaded.older, loaded.newer = append(above.Items, page.Items...), page.Next, above.Newer
+	return loaded
+}
+
+// filter narrows the river to tag, or shows all of it when tag is empty. Applying a tag keeps the reader's
+// place in time; clearing it returns to where they left the whole river, so reading ahead skips nothing.
+func (m *model) filter(tag string) tea.Cmd {
+	wanted := m.tag
+	if m.pendingRead != nil {
+		wanted = m.pendingRead.tag
+	}
+	if tag == wanted {
+		return nil
+	}
+	read := windowRead{tag: tag, at: m.divider}
+	switch {
+	case m.pendingRead != nil && m.pendingRead.resume:
+		read = *m.pendingRead // The launch read has not landed, so the divider is unknown; it still resumes.
+		read.tag = tag
+	case tag == "":
+		if m.unfiltered != nil {
+			read.at = m.unfiltered
+		}
+	case len(m.rows) > 0:
+		at := m.rows[m.cursor].position
+		read.at = &at
+		if m.tag == "" {
+			m.unfiltered = &at
+		}
+	}
+	return m.readWindow(read)
 }
 
 // work wraps a command that uses the river so that it does nothing once the program has finished.

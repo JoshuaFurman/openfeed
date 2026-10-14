@@ -223,9 +223,8 @@ func (m *model) subscribed(msg subscribed) tea.Cmd {
 	return m.reload() // As after a refresh: the new feed's posts are reconciled into the span.
 }
 
-// overlay draws the popup centered over the river, moving its cursor into place on the screen.
-func (m *model) overlay(river string) (string, *tea.Cursor) {
-	box, cursor := m.form.view(m.spinner.View())
+// overlay draws a popup's box centered over the river, moving its cursor, if any, into place on the screen.
+func (m *model) overlay(river, box string, cursor *tea.Cursor) (string, *tea.Cursor) {
 	if m.width == 0 {
 		return box, cursor
 	}

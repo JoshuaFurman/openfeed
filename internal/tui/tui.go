@@ -16,6 +16,7 @@ import (
 // River is the reader behavior the TUI depends on; *reader.Reader implements it.
 type River interface {
 	Feeds() []config.Feed
+	Tags() []string
 	Subscribe(ctx context.Context, feed config.Feed) (config.Feed, error)
 	Timeline(ctx context.Context, query reader.Query) (reader.Page, error)
 	Refresh(ctx context.Context) (reader.Report, error)
@@ -28,7 +29,7 @@ type River interface {
 const exitSave = 5 * time.Second
 
 // Run shows the river until the user quits or ctx ends, resuming where the reader left off and saving
-// the position they reach. It refreshes at launch and on pull, and n subscribes to a feed.
+// the position they reach. It refreshes at launch and on pull, n subscribes to a feed, and / filters by tag.
 // Signals are the caller's to handle: cancel ctx to stop, and Run returns ctx's error.
 func Run(ctx context.Context, river River) error {
 	return run(ctx, newModel(ctx, river, openBrowser, time.Now))

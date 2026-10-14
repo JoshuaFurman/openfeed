@@ -42,6 +42,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
 | **Source of truth** | **Config is intent; the DB is local state.** Feeds are declared in hand-editable `config.toml`. The DB holds feed caches, derived data, and the saved reading position; it never owns a subscription. | Deleting `openfeed.db` never loses a subscription. It does lose the reading position, which is not regenerable, and cached posts that have left their feeds' windows. Subscriptions stay greppable and version-controllable. |
 | **Adding subscriptions** | `n` opens a popup for a URL, an optional name, and comma-separated tags. `Reader.Subscribe` validates offline and rejects a subscribed URL, fetches with any cached validators, and only then appends to config. It saves that fetch as the feed's refresh and adds the feed to the live set. Any failure leaves config and river unchanged and shows in the popup. With no subscriptions, the TUI still opens. | There is no in-app removal, so fetching first keeps typos and homepage URLs out of config and reports them where the user typed. A feed whose server is down cannot be added until it returns. Saving the fetch shows the posts at once without a second request. Saving the offline-valid URL and letting refresh report failures was rejected. |
+| **Tag filters** | `/` picks one configured tag, or "All posts"; Esc also returns to the whole river. Tags match ignoring case and surrounding space. `Query.Tag` narrows the reader's configured URL set, and `Reader.Tags` lists tags by the same rule. Applying a tag keeps the place in time; clearing returns to where the whole river was left. Filtered views never reach. | A tag is a lens over the same river, so the store learns nothing about tags; its URL selection already filters. Clearing at the filtered view's place was rejected: the next move in the whole river would mark the posts the filter hid as seen. Several tags at once, typing a tag, and cycling with `/` were rejected as more than one lens needs. |
 | **Config writes** | Adding appends one `[[feed]]` block in a single `O_APPEND` write, once `Load`'s parser accepts the reread file plus the block. BurntSushi's encoder escapes values, and a blank name is omitted so the host fallback stays implicit. Nothing rewrites the file. | Decode, modify, and encode deletes every comment. Writing a temporary file and renaming it replaces a dotfile manager's symlink and resets permissions. Rereading catches duplicates added by hand since launch. Two processes adding one URL at the same instant can both pass validation; the next `Load` names the duplicate. Removing and renaming still need a round-tripping decision. |
 | **Item models** | `feed.Item` represents publisher data; `store.RefreshItem` and `store.TimelineItem` are separate store-owned input and read models. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
 | **Untrusted terminal text** | Every string written to a terminal passes one sanitizer, `tui.Sanitize`: titles, URLs, config names, paths, and errors. Control characters and line/paragraph separators become spaces, and bidirectional formatting characters are dropped. Dates shown in the river are `EffectiveDate`, not raw publication dates. | Feed text can carry escape sequences that rewrite the screen or change terminal state, and bidi overrides can make a URL display as a different host. One rule for every string leaves no unsanitized path. Effective dates keep the list reading in river order when a publisher's date is in the future. |
@@ -58,7 +59,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors come from results or `SeenPosition` and are used only with the same database, including across handles/reopen. They compare in timeline order across URL sets; continuing a traversal requires the same URL set. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system. The seen position persists its own columns, never a serialized cursor or page continuation. |
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
-| **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds with config names, `Refresh`, `Subscribe`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. The configured set grows only through `Subscribe` and is replaced rather than modified, so each read or round uses one snapshot. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
+| **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds, or one tag's, with config names, `Tags`, `Refresh`, `Subscribe`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. The configured set grows only through `Subscribe` and is replaced rather than modified, so each read or round uses one snapshot. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
 | **Refresh policy** | Refresh at launch, while the cached river shows, and on pull: a double-tap of `k` or ↑ at the newest post. Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. A double-tap rather than a single press stops a stray tap, or scrolling up with a held key, from refreshing. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
@@ -158,7 +159,7 @@ this.
 
 Only user navigation in the unfiltered river advances the position: selecting a post or explicitly
 jumping to the newest. Launch placement, refresh, page loads, rendering, corrections, subscription
-changes, and scrolling older never do; later filtered views display the point without advancing it.
+changes, and scrolling older never do; filtered views display the point without advancing it.
 A session reads the point once as its displayed divider and advances the saved point separately.
 `Reached` keeps the furthest navigated position in memory, and `SaveSeen` writes it only when it has
 grown. The interface calls `SaveSeen` on a debounce, after each refresh, and at exit; a failed save is
@@ -238,7 +239,8 @@ reaches the newest post once it loads. `o` reaches its post only when the articl
 placement and refreshes never reach. `SaveSeen` runs after 2s without another navigation, after
 each refresh, and at exit. The exit save runs after the program's commands have stopped, under its own
 5s deadline, so it still happens when a signal ended the program. Keys: `j`/`k` or the arrows move, `g` or Home jumps to the newest, `o` or Enter opens the article
-URL through the platform opener without a shell, `n` adds a feed, `q` or Ctrl-C quits, and Ctrl-Z
+URL through the platform opener without a shell, `n` adds a feed, `/` filters by tag and Esc clears the
+filter, `q` or Ctrl-C quits, and Ctrl-Z
 suspends (raw mode delivers it as a key). `tui.Run` returns the context's
 error when canceled; Bubble Tea's own signal handler is disabled so that the command owns signals.
 
@@ -254,6 +256,22 @@ when its popup was abandoned still joins the river. A new subscription closes th
 name column, and reloads the window as a refresh does, so its posts land in place without moving the
 cursor. A window below the head shows them at the next head reload. Late discoveries below the divider
 include the feed's back catalog.
+
+### Filtering by tag
+
+`/` draws a popup over the river, as `n` does, listing "All posts" and then `Reader.Tags`. It starts on
+the active tag, or on the first tag when none is active; with no tags, the status line says how to add
+some instead. `j`/`k` or the arrows move, Enter applies, and Esc or `q` closes it. Ctrl-C and Ctrl-Z keep
+their meaning. The header shows the filter as `#tag`, sanitized.
+
+A filter change is a window read that carries its tag, so the model's tag is always the shown window's.
+The old window stays, with its own prefetches and reaching, until the new one lands. Applying a tag opens
+around the selected post's position, placing the cursor on the newest tagged post at or below it.
+Leaving the whole river records that position, and clearing a filter opens around it, or around the
+divider when none was recorded. A launch resume still pending reruns under the new tag, so the divider
+is still read once. A failed filter read is retried by the next move, and refreshes, paging, and
+subscribing reload the filtered span. Navigation, `g`, and `o` in a filtered view never reach. An empty
+filtered view says so and points to Esc.
 
 ### Paths
 

@@ -13,7 +13,7 @@ import (
 const (
 	ageWidth = 8 // Fits "Jan 2006", the widest age.
 	title    = " openfeed"
-	hints    = "j/k move · g newest · o open · n add · q quit "
+	hints    = "j/k move · g newest · o open · / tag · n add · q quit "
 )
 
 var (
@@ -34,6 +34,8 @@ func (m *model) View() tea.View {
 		lines = append(lines, fit(" Loading…", m.width))
 	case m.headFailed:
 		lines = append(lines, fit(" Could not read the river. Press g to retry.", m.width))
+	case len(m.rows) == 0 && m.tag != "":
+		lines = append(lines, fit(" No posts tagged "+Sanitize(m.tag)+". Press Esc for all posts.", m.width))
 	case len(m.rows) == 0 && m.refreshing:
 		lines = append(lines, fit(" No posts yet. Refreshing…", m.width))
 	case len(m.rows) == 0:
@@ -60,8 +62,12 @@ func (m *model) View() tea.View {
 	}
 
 	view := tea.NewView(strings.Join(lines, "\n"))
-	if m.form != nil {
-		view.Content, view.Cursor = m.overlay(view.Content)
+	switch {
+	case m.form != nil:
+		box, cursor := m.form.view(m.spinner.View())
+		view.Content, view.Cursor = m.overlay(view.Content, box, cursor)
+	case m.picker != nil:
+		view.Content, _ = m.overlay(view.Content, m.picker.view(m.formWidth(), m.height), nil)
 	}
 	view.AltScreen = true
 	return view
@@ -88,9 +94,13 @@ func (m *model) dividerLine() string {
 	return dimStyle.Render(fit(label+strings.Repeat("─", max(m.width-ansi.StringWidth(label), 0)), m.width))
 }
 
-// header shows the title, the spinner while refreshing, and the key hints right-aligned when they fit.
+// header shows the title, the tag filter, the spinner while refreshing, and the key hints right-aligned
+// when they fit.
 func (m *model) header() string {
 	left := headerStyle.Render(title)
+	if m.tag != "" {
+		left += " #" + Sanitize(m.tag)
+	}
 	if m.refreshing {
 		left += " " + m.spinner.View() + dimStyle.Render(" refreshing")
 	}

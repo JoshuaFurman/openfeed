@@ -94,6 +94,11 @@ the last 30 seconds is not fetched again, but the pull still shows its spinner. 
 hides posts that are already cached; the status line says why it failed, and the log has the
 details.
 
+Press `/` to read only one tag's feeds. It lists your tags, with `Tech` and `tech` counting as one, and
+the header shows the filter, as in `openfeed #tech`. The filter keeps your place in time, and Esc
+returns you to where you were in the whole river. Reading in a filtered view never moves "You left off
+here", because it passes over posts the filter hides.
+
 | Key | Action |
 |---|---|
 | `j` / `k` or ↓ / ↑ | Move through the river; older posts load as you scroll |
@@ -101,6 +106,8 @@ details.
 | `g` or Home | Jump to the newest post |
 | `o` or Enter | Open the post's article in your browser |
 | `n` | Add a feed: Enter subscribes, Tab or ↓ / ↑ change fields, Esc cancels |
+| `/` | Filter by tag: `j` / `k` choose a tag or All posts, Enter applies, Esc cancels |
+| Esc | Leave a tag filter for the whole river |
 | `q` or Ctrl-C | Quit |
 | Ctrl-Z | Suspend to the shell (`fg` returns) |
 
@@ -110,7 +117,7 @@ openfeed is deliberately small so far. It does not have:
 
 - a reader pane: `o` opens the article in your browser;
 - removing or renaming subscriptions in the app, or OPML import: edit `config.toml`;
-- search, feed or tag filters, the web UI, or AI features;
+- search, filtering by feed, the web UI, or AI features;
 - pruning: cached posts are never deleted, so the database grows with your subscriptions. Removing a
   feed from the config hides its posts without deleting them;
 - log rotation: the log file grows too.

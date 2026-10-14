@@ -78,6 +78,12 @@ func fresh(key, title string, age time.Duration) feed.Item {
 // seed caches posts for each named feed and returns a reader over them, with the fetcher its refreshes use.
 func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *fetcher) {
 	t.Helper()
+	return seedTagged(t, nil, posts, extraFeeds...)
+}
+
+// seedTagged seeds as seed does, configuring each named feed with its tags.
+func seedTagged(t *testing.T, tags map[string][]string, posts []post, extraFeeds ...string) (*reader.Reader, *fetcher) {
+	t.Helper()
 	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "openfeed.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -86,12 +92,12 @@ func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *fe
 	byFeed := map[string][]store.RefreshItem{}
 	var feeds []config.Feed
 	for _, name := range extraFeeds {
-		feeds = append(feeds, config.Feed{URL: feedURL(name), Name: name})
+		feeds = append(feeds, config.Feed{URL: feedURL(name), Name: name, Tags: tags[name]})
 	}
 	for i, p := range posts {
 		url := feedURL(p.feed)
 		if byFeed[url] == nil {
-			feeds = append(feeds, config.Feed{URL: url, Name: p.feed})
+			feeds = append(feeds, config.Feed{URL: url, Name: p.feed, Tags: tags[p.feed]})
 		}
 		byFeed[url] = append(byFeed[url], store.RefreshItem{
 			Key: fmt.Sprintf("id:%d", i), Title: p.title, URL: p.url, PublishedAt: now.Add(-p.age),
@@ -294,10 +300,10 @@ func TestRiverRendersNewestFirst(t *testing.T) {
 		{"alpha", "Last week", "https://alpha.example/2", 10 * 24 * time.Hour},
 		{"alpha", "Last year", "https://alpha.example/3", 400 * 24 * time.Hour},
 	})
-	m := start(t, river, 60, 8, noOpen(t))
+	m := start(t, river, 70, 8, noOpen(t))
 	lines := screen(m)
 	want := []string{
-		title + strings.Repeat(" ", 60-ansi.StringWidth(title)-ansi.StringWidth(hints)) + strings.TrimSpace(hints),
+		title + strings.Repeat(" ", 70-ansi.StringWidth(title)-ansi.StringWidth(hints)) + strings.TrimSpace(hints),
 		"▸ 30m       日本   Wide name exe.txt",
 		"  3h        alpha  Older  [2Jpost",
 		"  5h        alpha  (untitled)",
@@ -1286,8 +1292,8 @@ func TestLaunchRefreshBeforeTheWindowStillResumes(t *testing.T) {
 	saveAt(t, river, "post 100")
 	m := build(t, river, noOpen(t))
 	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 16})
-	first := m.readWindow(m.resumeRead)() // The launch read, still in flight.
-	send(t, m, refreshed{})               // The launch refresh finishes first and rereads the window.
+	first := m.readWindow(windowRead{resume: true})() // The launch read, still in flight.
+	send(t, m, refreshed{})                           // The launch refresh finishes first and rereads the window.
 	send(t, m, first)
 	if !strings.Contains(selected(t, m), "post 100") || m.divider == nil {
 		t.Errorf("rereading during launch did not resume: selected %q", selected(t, m))
@@ -1324,7 +1330,7 @@ func TestResumePlacementWaitsForTheTerminalSize(t *testing.T) {
 	river, _ := seed(t, numbered(130))
 	saveAt(t, river, "post 100")
 	m := build(t, river, noOpen(t))
-	send(t, m, m.readWindow(m.resumeRead)()) // Arrives before the first size.
+	send(t, m, m.readWindow(windowRead{resume: true})()) // Arrives before the first size.
 	send(t, m, tea.WindowSizeMsg{Width: 60, Height: 16})
 	if screenRow := m.cursor - m.offset; !strings.Contains(selected(t, m), "post 100") || screenRow < m.visible()/2 {
 		t.Errorf("resumed post is on screen row %d, want the lower part", screenRow)
