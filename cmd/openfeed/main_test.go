@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/JoshuaFurman/openfeed/internal/config"
 	"github.com/JoshuaFurman/openfeed/internal/reader"
 	"github.com/JoshuaFurman/openfeed/internal/tui"
 )
@@ -40,20 +41,6 @@ func writeConfig(t *testing.T, path, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func offline(t *testing.T) *http.Client {
-	return &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
-		t.Errorf("unexpected request to %s", req.URL)
-		return nil, errors.New("offline")
-	})}
-}
-
-func never(t *testing.T) present {
-	return func(context.Context, tui.River) error {
-		t.Error("the river was presented")
-		return nil
 	}
 }
 
@@ -93,17 +80,38 @@ func capture(t *testing.T, into *presented) present {
 	}
 }
 
-func TestRunFirstLaunch(t *testing.T) {
+// A first launch opens the empty river, and a feed added there is appended to the starter config.
+func TestRunFirstLaunchSubscribes(t *testing.T) {
 	configPath, _ := isolate(t)
-	var out bytes.Buffer
-	if err := run(t.Context(), &out, offline(t), never(t)); err != nil {
+	const jsonFeed = `{"version": "https://jsonfeed.org/version/1.1", "title": "New", "items": [
+		{"id": "1", "title": "First post", "url": "https://new.example/1", "date_published": "2025-09-01T10:00:00Z"}
+	]}`
+	client := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(jsonFeed)), Request: req}, nil
+	})}
+	var after presented
+	err := run(t.Context(), client, func(ctx context.Context, river tui.River) error {
+		if feeds := river.Feeds(); len(feeds) != 0 {
+			t.Errorf("first launch feeds = %+v", feeds)
+		}
+		if _, err := river.Subscribe(ctx, config.Feed{URL: "https://new.example/feed", Name: "new"}); err != nil {
+			return err
+		}
+		return capture(t, &after)(ctx, river)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "No subscriptions yet") || !strings.Contains(out.String(), configPath) {
-		t.Errorf("first launch printed %q", out.String())
+	if want := []string{"First post@new"}; !slices.Equal(after.river, want) {
+		t.Errorf("river = %v, want %v", after.river, want)
 	}
-	if _, err := os.Stat(configPath); err != nil {
-		t.Errorf("starter config not written: %v", err)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.HasPrefix(got, "# openfeed configuration") ||
+		!strings.HasSuffix(got, "\n\n[[feed]]\nurl = \"https://new.example/feed\"\nname = \"new\"\n") {
+		t.Errorf("config.toml = %q, want the starter config with the feed appended", got)
 	}
 }
 
@@ -130,13 +138,9 @@ name = "broken"
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(jsonFeed)), Request: req}, nil
 	})}
 
-	var out bytes.Buffer
 	var first presented
-	if err := run(t.Context(), &out, client, capture(t, &first)); err != nil {
+	if err := run(t.Context(), client, capture(t, &first)); err != nil {
 		t.Fatal(err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("run printed %q before the TUI", out.String())
 	}
 	if !slices.Equal(first.statuses, []reader.Status{reader.Refreshed, reader.Failing}) {
 		t.Errorf("launch statuses = %v", first.statuses)
@@ -150,7 +154,7 @@ name = "broken"
 	}
 
 	var second presented
-	if err := run(t.Context(), &out, client, capture(t, &second)); err != nil {
+	if err := run(t.Context(), client, capture(t, &second)); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(second.statuses, []reader.Status{reader.NotDue, reader.Failing}) || !slices.Equal(second.river, first.river) {
@@ -167,16 +171,15 @@ func TestRunReturnsCancellationAndLeavesTheStoreReopenable(t *testing.T) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	})}
-	var out bytes.Buffer
 	var canceled presented
-	if err := run(ctx, &out, client, capture(t, &canceled)); !errors.Is(err, context.Canceled) {
+	if err := run(ctx, client, capture(t, &canceled)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled run returned %v", err)
 	}
 	unavailable := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 	})}
 	var again presented
-	err := run(t.Context(), &out, unavailable, capture(t, &again))
+	err := run(t.Context(), unavailable, capture(t, &again))
 	if err != nil || !slices.Equal(again.statuses, []reader.Status{reader.Failing}) {
 		t.Errorf("database did not reopen cleanly, or the canceled round saved something: %v, %+v", err, again)
 	}
@@ -189,7 +192,7 @@ func TestRunReturnsPresenterErrors(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 	})}
 	failure := errors.New("terminal lost")
-	err := run(t.Context(), io.Discard, unavailable, func(context.Context, tui.River) error { return failure })
+	err := run(t.Context(), unavailable, func(context.Context, tui.River) error { return failure })
 	if !errors.Is(err, failure) {
 		t.Errorf("run returned %v, want the presenter's error", err)
 	}

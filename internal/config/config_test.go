@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -179,8 +180,8 @@ func TestNormalizeDerivesNameFromHost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := Feed{URL: tc.url}
-			if err := f.normalize(); err != nil {
-				t.Fatalf("normalize: %v", err)
+			if err := f.Normalize(); err != nil {
+				t.Fatalf("Normalize: %v", err)
 			}
 			if f.Name != tc.want {
 				t.Errorf("Name = %q, want %q", f.Name, tc.want)
@@ -203,5 +204,164 @@ func TestNormalizeKeepsExplicitName(t *testing.T) {
 	}
 	if len(got.Tags) != 1 || got.Tags[0] != "tech" {
 		t.Errorf("Tags = %v, want [tech]", got.Tags)
+	}
+}
+
+// loadAndRead loads the current test's config and returns its file's bytes.
+func loadAndRead(t *testing.T) (*Config, string) {
+	t.Helper()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	data, err := os.ReadFile(cfg.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg, string(data)
+}
+
+func TestAddAppendsWithoutRewriting(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+		feed     Feed
+		want     Feed
+		appended string
+	}{
+		{
+			name:     "after comments, name left implicit",
+			existing: "# my feeds\n[[feed]]\nurl  = \"https://a.example/feed\" # aligned\n",
+			feed:     Feed{URL: "  https://WWW.B.example/rss  ", Name: "  "},
+			want:     Feed{URL: "https://www.b.example/rss", Name: "b.example"},
+			appended: "\n[[feed]]\nurl = \"https://www.b.example/rss\"\n",
+		},
+		{
+			name:     "unterminated last line",
+			existing: "[[feed]]\nurl = \"https://a.example/feed\"",
+			feed:     Feed{URL: "https://b.example/rss", Name: " bee ", Tags: []string{"tech", "daily"}},
+			want:     Feed{URL: "https://b.example/rss", Name: "bee", Tags: []string{"tech", "daily"}},
+			appended: "\n\n[[feed]]\nurl = \"https://b.example/rss\"\nname = \"bee\"\ntags = [\"tech\", \"daily\"]\n",
+		},
+		{
+			name:     "empty file",
+			feed:     Feed{URL: "https://b.example/rss", Name: `quote " and \ back`},
+			want:     Feed{URL: "https://b.example/rss", Name: `quote " and \ back`},
+			appended: "[[feed]]\nurl = \"https://b.example/rss\"\nname = \"quote \\\" and \\\\ back\"\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempXDG(t)
+			writeConfig(t, tc.existing)
+			cfg, _ := loadAndRead(t)
+			before := len(cfg.Feeds)
+
+			got, err := cfg.Add(tc.feed)
+			if err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Add = %+v, want %+v", got, tc.want)
+			}
+			if len(cfg.Feeds) != before {
+				t.Errorf("Add changed the loaded feeds to %v", cfg.Feeds)
+			}
+			reloaded, data := loadAndRead(t)
+			if data != tc.existing+tc.appended {
+				t.Errorf("file = %q, want the original followed by %q", data, tc.appended)
+			}
+			if last := reloaded.Feeds[len(reloaded.Feeds)-1]; !reflect.DeepEqual(last, tc.want) {
+				t.Errorf("reloaded feed = %+v, want %+v", last, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddRejectsWithoutWriting(t *testing.T) {
+	const existing = "[[feed]]\nurl = \"https://a.example/feed\"\n"
+	tests := []struct {
+		name     string
+		existing string
+		feed     Feed
+		wantErr  string
+	}{
+		{"missing url", existing, Feed{Name: "nameless"}, "missing url"},
+		{"unsupported scheme", existing, Feed{URL: "ftp://b.example/rss"}, "scheme must be http or https"},
+		{"duplicate differing in host case", existing, Feed{URL: "https://A.example/feed"}, "feed 2 duplicates feed 1"},
+		{"file broken since launch", existing + "[[feed]\n", Feed{URL: "https://b.example/rss"}, "parse"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempXDG(t)
+			writeConfig(t, existing)
+			cfg, _ := loadAndRead(t)
+			writeConfig(t, tc.existing)
+
+			if _, err := cfg.Add(tc.feed); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Add error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if data, err := os.ReadFile(cfg.FilePath()); err != nil || string(data) != tc.existing {
+				t.Errorf("file = %q, %v; want it unchanged", data, err)
+			}
+		})
+	}
+}
+
+// A hand-added duplicate is caught even though it postdates Load.
+func TestAddRereadsTheFile(t *testing.T) {
+	useTempXDG(t)
+	cfg, _ := loadAndRead(t)
+	writeConfig(t, "[[feed]]\nurl = \"https://b.example/rss\"\n")
+	if _, err := cfg.Add(Feed{URL: "https://b.example/rss"}); err == nil || !strings.Contains(err.Error(), "duplicates") {
+		t.Errorf("Add error = %v, want a duplicate", err)
+	}
+}
+
+func TestAddRecreatesAMissingFile(t *testing.T) {
+	useTempXDG(t)
+	cfg, _ := loadAndRead(t)
+	if err := os.Remove(cfg.FilePath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.Add(Feed{URL: "https://b.example/rss"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	_, data := loadAndRead(t)
+	if want := starterConfig + "\n[[feed]]\nurl = \"https://b.example/rss\"\n"; data != want {
+		t.Errorf("file = %q, want the starter config and the feed", data)
+	}
+	if info, err := os.Stat(cfg.FilePath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("recreated file mode = %v, %v; want 0600", info.Mode(), err)
+	}
+}
+
+// Dotfile managers often link config.toml into a repository; adding must write through the link.
+func TestAddKeepsASymlink(t *testing.T) {
+	useTempXDG(t)
+	cfg, _ := loadAndRead(t)
+	target := filepath.Join(t.TempDir(), "dotfiles-config.toml")
+	if err := os.WriteFile(target, []byte("# tracked\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cfg.FilePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, cfg.FilePath()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cfg.Add(Feed{URL: "https://b.example/rss"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if info, err := os.Lstat(cfg.FilePath()); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config.toml is no longer a symlink: %v, %v", info.Mode(), err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "# tracked\n\n[[feed]]\nurl = \"https://b.example/rss\"\n" {
+		t.Errorf("target = %q, %v", data, err)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o640 {
+		t.Errorf("target mode = %v, %v; want it unchanged", info.Mode(), err)
 	}
 }

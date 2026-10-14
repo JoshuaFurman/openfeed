@@ -118,8 +118,11 @@ type model struct {
 	offset        int // First visible row.
 	width, height int
 	nameWidth     int
+	feedCount     int                 // Configured subscriptions.
 	failing       []reader.FeedResult // Feeds that failed the latest refresh.
 	notice        string              // Replaces the status line until the next key press.
+	form          *addForm            // The add-feed popup, while it shows.
+	forms         int                 // Popups opened, which tells each one's answer apart.
 }
 
 func newModel(ctx context.Context, river River, open func(string) error, now func() time.Time) *model {
@@ -130,11 +133,18 @@ func newModel(ctx context.Context, river River, open func(string) error, now fun
 		animate: true, minSpin: minSpin, saveDelay: saveDelay,
 		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
-	// Sized from the configuration, so the column never shifts as pages load.
-	for _, f := range river.Feeds() {
+	m.sizeNames()
+	return m
+}
+
+// sizeNames fits the name column to the configured feeds, so it shifts only when one is added, never as
+// pages load.
+func (m *model) sizeNames() {
+	feeds := m.river.Feeds()
+	m.feedCount = len(feeds)
+	for _, f := range feeds {
 		m.nameWidth = min(max(m.nameWidth, ansi.StringWidth(Sanitize(f.Name))), maxNameWidth)
 	}
-	return m
 }
 
 // Init resumes the cached river where the reader left off while the launch refresh runs.
@@ -149,9 +159,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.offset = m.cursor - m.visible()*2/3
 		}
 		m.follow()
+		if m.form != nil {
+			m.form.resize(m.formWidth())
+		}
 	case tea.KeyPressMsg:
 		m.notice = ""
 		m.placePending = false // The reader has taken over the view.
+		if m.form != nil {
+			return m, m.formKey(msg)
+		}
 		return m, m.key(msg)
 	case ageTick:
 		return m, m.tick
@@ -160,7 +176,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.saveSeen()
 		}
 	case spinner.TickMsg:
-		if !m.refreshing {
+		if !m.refreshing && (m.form == nil || !m.form.checking) {
 			break // Dropping the tick stops the animation.
 		}
 		var cmd tea.Cmd
@@ -247,6 +263,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		return m, m.reached(msg.row) // Only an article that opened counts as reached.
+	case subscribed:
+		return m, m.subscribed(msg)
+	default:
+		if m.form != nil && !m.form.checking {
+			return m, m.form.edit(msg) // A paste, or the clipboard text that ctrl+v reads.
+		}
 	}
 	return m, nil
 }
@@ -268,6 +290,9 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 		return tea.Suspend // Raw mode delivers Ctrl-Z as a key rather than a stop signal.
 	case "o", "enter":
 		return m.openSelected()
+	case "n":
+		m.openForm()
+		return nil
 	}
 	if m.headFailed {
 		return m.loadHead() // Any move retries a launch read that failed.

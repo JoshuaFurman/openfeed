@@ -41,6 +41,8 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **SQLite connections** | WAL, one connection per store, foreign keys enabled, and FULL synchronous durability. Retry busy lock acquisition for at most five seconds, respecting caller cancellation; never replay a partially executed transaction. | Small local operations do not need an in-process pool. WAL permits readers in another process during writes; Go-managed waits avoid a long, non-cancellable SQLite busy timeout. |
 | **Migrations** | Numbered embedded SQL files and a `schema_migrations` ledger; all pending migrations and their version records commit in one exclusive transaction. Check/migrate before enabling WAL; reject newer schemas without changing them. | Exclusive locking prevents commit contention during concurrent first opens, before WAL exists; under WAL it is equivalent to immediate locking and permits readers. The first migration owns only bookkeeping; domain tables arrive with their reviewed behavior. |
 | **Source of truth** | **Config is intent; the DB is local state.** Feeds are declared in hand-editable `config.toml`. The DB holds feed caches, derived data, and the saved reading position; it never owns a subscription. | Deleting `openfeed.db` never loses a subscription. It does lose the reading position, which is not regenerable, and cached posts that have left their feeds' windows. Subscriptions stay greppable and version-controllable. |
+| **Adding subscriptions** | `n` opens a popup for a URL, an optional name, and comma-separated tags. `Reader.Subscribe` validates offline and rejects a subscribed URL, fetches with any cached validators, and only then appends to config. It saves that fetch as the feed's refresh and adds the feed to the live set. Any failure leaves config and river unchanged and shows in the popup. With no subscriptions, the TUI still opens. | There is no in-app removal, so fetching first keeps typos and homepage URLs out of config and reports them where the user typed. A feed whose server is down cannot be added until it returns. Saving the fetch shows the posts at once without a second request. Saving the offline-valid URL and letting refresh report failures was rejected. |
+| **Config writes** | Adding appends one `[[feed]]` block in a single `O_APPEND` write, once `Load`'s parser accepts the reread file plus the block. BurntSushi's encoder escapes values, and a blank name is omitted so the host fallback stays implicit. Nothing rewrites the file. | Decode, modify, and encode deletes every comment. Writing a temporary file and renaming it replaces a dotfile manager's symlink and resets permissions. Rereading catches duplicates added by hand since launch. Two processes adding one URL at the same instant can both pass validation; the next `Load` names the duplicate. Removing and renaming still need a round-tripping decision. |
 | **Item models** | `feed.Item` represents publisher data; `store.RefreshItem` and `store.TimelineItem` are separate store-owned input and read models. | Avoids leaking HTTP/parser concerns into presentation or database IDs into fetching. |
 | **Untrusted terminal text** | Every string written to a terminal passes one sanitizer, `tui.Sanitize`: titles, URLs, config names, paths, and errors. Control characters and line/paragraph separators become spaces, and bidirectional formatting characters are dropped. Dates shown in the river are `EffectiveDate`, not raw publication dates. | Feed text can carry escape sequences that rewrite the screen or change terminal state, and bidi overrides can make a URL display as a different host. One rule for every string leaves no unsanitized path. Effective dates keep the list reading in river order when a publisher's date is in the future. |
 | **Feed labels** | Resolved config names are authoritative, including the hostname fallback. Fetched titles never rename subscriptions. | No naming-provenance flag or config changes needed for fetching. |
@@ -56,7 +58,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Timeline results and cursors** | Store-owned items expose a stable database-local `ItemID`, source URL, publisher fields, publication/first-fetch times, and an opaque observed position. Cursors come from results or `SeenPosition` and are used only with the same database, including across handles/reopen. They compare in timeline order across URL sets; continuing a traversal requires the same URL set. | Keep publisher inputs and config labels separate from persisted identity. Cursor scope is a caller constraint, as with `FeedState`, not a new database identity system. The seen position persists its own columns, never a serialized cursor or page continuation. |
 | **Timeline indexing** | One global expression index on effective date descending, ID descending, and source URL. Bind the selected URLs as a JSON array; apply scalar date bounds alongside full date/ID comparisons. | Avoid per-feed merging, SQL variable-count limits, and a generated date column. SQLite does not seek with the expression tuple alone; date seeks can still scan ties and inactive entries, so page size bounds results, not total database work. |
 | **Feed fetching** | A stateless client accepts/returns ETag and Last-Modified validators, with a 30-second deadline and 10 MiB body limit. | Storage owns persistence; validators must be committed with successfully fetched items, never before them. Limits bound stalled or oversized responses. |
-| **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds with config names, `Refresh`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
+| **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds with config names, `Refresh`, `Subscribe`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. The configured set grows only through `Subscribe` and is replaced rather than modified, so each read or round uses one snapshot. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
 | **Refresh policy** | Refresh at launch, while the cached river shows, and on pull: a double-tap of `k` or ↑ at the newest post. Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. A double-tap rather than a single press stops a stray tap, or scrolling up with a held key, from refreshing. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
 | **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
@@ -199,7 +201,8 @@ replaced the window is dropped. The divider stays at the session's launch baseli
 "── You left off here ──". Rows show the `EffectiveDate` age (now, minutes, hours, days, then the
 date, redrawn each minute), the config feed name, and the title, "(untitled)" when a post has none.
 Rows keep only what the list shows, sanitized once when their page loads; feed content stays in the
-store. The name column is sized once from the configured names, so it never shifts as pages load.
+store. The name column is sized from the configured names, so it never shifts as pages load; it
+changes only when a subscription is added.
 Every string passes `tui.Sanitize`, and columns are sized by display width. The header carries the key
 hints; the status line shows notices and launch failures (one failure with its reason, several with
 their names and a pointer to the log). A failed page load shows in the status line, and the next move
@@ -235,9 +238,22 @@ reaches the newest post once it loads. `o` reaches its post only when the articl
 placement and refreshes never reach. `SaveSeen` runs after 2s without another navigation, after
 each refresh, and at exit. The exit save runs after the program's commands have stopped, under its own
 5s deadline, so it still happens when a signal ended the program. Keys: `j`/`k` or the arrows move, `g` or Home jumps to the newest, `o` or Enter opens the article
-URL through the platform opener without a shell, `q` or Ctrl-C quits, and Ctrl-Z suspends (raw mode
-delivers it as a key). `tui.Run` returns the context's
+URL through the platform opener without a shell, `n` adds a feed, `q` or Ctrl-C quits, and Ctrl-Z
+suspends (raw mode delivers it as a key). `tui.Run` returns the context's
 error when canceled; Bubble Tea's own signal handler is disabled so that the command owns signals.
+
+### Adding a feed
+
+`n` draws a popup centered over the river with a Lip Gloss compositor, using `bubbles/textinput`
+fields and the terminal's own cursor. While it shows, keys type into it: Enter subscribes, Tab or ↓/↑
+change fields, and Esc closes it, abandoning a check in flight. Ctrl-C and Ctrl-Z keep their meaning.
+Typed and pasted text is sanitized as it arrives, and errors pass `Sanitize` and wrap in the popup.
+While the feed is checked, the spinner runs and only Esc applies. Each popup's answer carries the
+popup's identity, so an abandoned popup's error is dropped. A subscription that was already recorded
+when its popup was abandoned still joins the river. A new subscription closes the popup, resizes the
+name column, and reloads the window as a refresh does, so its posts land in place without moving the
+cursor. A window below the head shows them at the next head reload. Late discoveries below the divider
+include the feed's back catalog.
 
 ### Paths
 
@@ -269,6 +285,7 @@ Downstream packages may rely on these and should not re-check them:
 - No two feeds share a URL.
 - `Feed.Name` is never empty; it falls back to the host with any `www.` prefix stripped. No renderer needs a blank-label branch.
 - A malformed subscription fails the whole load. Silently skipping one would unsubscribe the user from a feed they believe they are reading.
+- `Config.Add` writes only what this validation accepts against the reread file, so the next `Load` still establishes these. `Feed.Normalize` applies the per-feed rules alone.
 
 ---
 
@@ -398,7 +415,7 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 |---|---|---|
 | `github.com/BurntSushi/toml` | in use | Its decoder reports `Undecoded()` keys, so a typo in a hand-edited config (`nmae =`) becomes a named startup error instead of a silently missing setting. `pelletier/go-toml/v2` is faster but that matters nowhere in this program. |
 | `charm.land/bubbletea/v2` · `lipgloss/v2` | in use | TUI event loop and display-width-aware styling. v2 is the current stable line (2.0.10 / 2.0.6). |
-| `charm.land/bubbles/v2` | in use | The refresh spinner. `bubbles/list` is deliberately unused. |
+| `charm.land/bubbles/v2` | in use | The refresh spinner and the add-feed popup's text inputs. `bubbles/list` is deliberately unused. `textinput` brings `atotto/clipboard` for Ctrl-V: pure Go, shelling out to the platform's clipboard tool. |
 | `github.com/charmbracelet/x/ansi` | in use | Display-cell width and ANSI-aware truncation for the river's columns. Already a Lip Gloss dependency, so using it directly adds nothing to the build. |
 | `cobra` | planned | CLI subcommands, from the first one. Until then, stdlib `flag` parses the lone `--version`, and positional arguments are rejected rather than ignored. |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |

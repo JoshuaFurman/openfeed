@@ -41,7 +41,7 @@ func main() {
 		signal.Stop(signals) // A second signal during cleanup uses the default behavior and exits.
 		cancel(interrupted{received})
 	}()
-	err = run(ctx, os.Stdout, &http.Client{}, tui.Run)
+	err = run(ctx, &http.Client{}, tui.Run)
 	signal.Stop(signals)
 
 	code, report := exitStatus(err, context.Cause(ctx))
@@ -128,14 +128,10 @@ func onlyCancellation(err error) bool {
 // present shows the river; tests substitute one that inspects it.
 type present func(ctx context.Context, river tui.River) error
 
-func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient, show present) (err error) {
+func run(ctx context.Context, httpClient feed.HTTPClient, show present) (err error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
-	}
-	if len(cfg.Feeds) == 0 {
-		fmt.Fprintf(out, "No subscriptions yet. Add a [[feed]] block to %s\n", tui.Sanitize(cfg.FilePath()))
-		return nil
 	}
 
 	logFile, err := os.OpenFile(cfg.LogPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -152,6 +148,6 @@ func run(ctx context.Context, out io.Writer, httpClient feed.HTTPClient, show pr
 		return err
 	}
 	defer func() { err = errors.Join(err, st.Close()) }()
-	river := reader.New(cfg.Feeds, st, feed.NewClient(httpClient), slog.New(slog.NewTextHandler(logFile, nil)))
+	river := reader.New(cfg.Feeds, cfg, st, feed.NewClient(httpClient), slog.New(slog.NewTextHandler(logFile, nil)))
 	return show(ctx, river)
 }

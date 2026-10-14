@@ -19,7 +19,7 @@ terminal, with no backlog guilt.
   posts arrived since your last visit. Nothing is bold, nothing is a badge, nothing needs clearing.
   Items age out of the top on their own.
 - **Your sources, in a text file.** Subscriptions live in a hand-editable `config.toml` you can
-  grep, diff, and commit. Nothing is algorithmic unless you ask for it.
+  grep, diff, and commit; adding one in the app appends to it. Nothing is algorithmic unless you ask for it.
 - **Subscriptions never live in the database.** `rm openfeed.db` loses cached posts and your
   reading position — never a subscription.
 
@@ -61,10 +61,16 @@ There is no cgo anywhere in the dependency tree, so cross-compiling is just `GOO
 openfeed
 ```
 
-The first run writes a commented starter config and exits cleanly — openfeed is runnable
+The first run writes a commented starter config and opens an empty river — openfeed is runnable
 immediately after installation, with nothing to configure first.
 
-Subscribe by editing that file:
+Press `n` to subscribe. A popup asks for the feed's URL, an optional name, and optional
+comma-separated tags. openfeed fetches the URL first and saves it only if it is a working RSS, Atom,
+or JSON feed; otherwise the popup says why, so you can correct it. The new subscription's posts join
+the river at once, and it is appended to `config.toml` as a `[[feed]]` block, leaving the rest of the
+file, comments included, as you wrote it.
+
+You can also subscribe by editing that file:
 
 ```toml
 [[feed]]
@@ -94,15 +100,16 @@ details.
 | `k` `k` (or ↑ ↑) at the newest post | Refresh |
 | `g` or Home | Jump to the newest post |
 | `o` or Enter | Open the post's article in your browser |
+| `n` | Add a feed: Enter subscribes, Tab or ↓ / ↑ change fields, Esc cancels |
 | `q` or Ctrl-C | Quit |
 | Ctrl-Z | Suspend to the shell (`fg` returns) |
 
 ## Not yet
 
-v0.1 is deliberately small. It does not have:
+openfeed is deliberately small so far. It does not have:
 
 - a reader pane: `o` opens the article in your browser;
-- subscription commands or OPML import: edit `config.toml`;
+- removing or renaming subscriptions in the app, or OPML import: edit `config.toml`;
 - search, feed or tag filters, the web UI, or AI features;
 - pruning: cached posts are never deleted, so the database grows with your subscriptions. Removing a
   feed from the config hides its posts without deleting them;

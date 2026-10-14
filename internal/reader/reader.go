@@ -4,6 +4,8 @@ package reader
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"slices"
@@ -24,6 +26,12 @@ type ItemID = store.ItemID
 // Fetcher retrieves one feed using previous cache validators; feed.Client implements it.
 type Fetcher interface {
 	Fetch(ctx context.Context, feedURL string, previous feed.Validators) (feed.Result, error)
+}
+
+// Subscriptions durably records a new subscription and resolves it as config.Load would;
+// *config.Config implements it.
+type Subscriptions interface {
+	Add(feed config.Feed) (config.Feed, error)
 }
 
 // Item is a cached post labeled with its subscription's configured name.
@@ -49,67 +57,132 @@ type Page struct {
 	Newer *Position
 }
 
-// Reader serves one river across a fixed set of configured subscriptions.
+// Reader serves one river across the configured subscriptions, which Subscribe extends.
 // Construct it with New; a Reader is safe for concurrent use.
 type Reader struct {
-	feeds   []config.Feed
-	hosts   []string // Request-slot key for each feed.
-	urls    []string
-	names   map[string]string
+	subs    Subscriptions
 	store   *store.Store
 	fetcher Fetcher
 	log     *slog.Logger
 	now     func() time.Time
 
+	adding   sync.Mutex // Serializes Subscribe's duplicate check, config write, and feed set swap.
 	mu       sync.Mutex
+	set      *feedSet // Replaced, never modified, so reads and rounds use a consistent snapshot.
 	round    *round
 	failures map[string]failure
 	reached  *Position
 	saved    *Position
 }
 
-// New serves feeds from st, refreshing them through fetcher; a nil logger discards failures.
-// Feeds must satisfy config.Load's invariants; later config changes need a new Reader.
-func New(feeds []config.Feed, st *store.Store, fetcher Fetcher, log *slog.Logger) *Reader {
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
-	}
-	r := &Reader{
-		feeds:    slices.Clone(feeds),
-		names:    make(map[string]string, len(feeds)),
-		store:    st,
-		fetcher:  fetcher,
-		log:      log,
-		now:      time.Now,
-		failures: make(map[string]failure),
-	}
-	for _, f := range r.feeds {
+// feedSet is the configured subscriptions, in config order, with what reads and rounds derive from them.
+type feedSet struct {
+	feeds []config.Feed
+	hosts []string // Request-slot key for each feed.
+	urls  []string
+	names map[string]string
+}
+
+func newFeedSet(feeds []config.Feed) *feedSet {
+	set := &feedSet{feeds: feeds, names: make(map[string]string, len(feeds))}
+	for _, f := range feeds {
 		host := f.URL
 		if u, err := url.Parse(f.URL); err == nil {
 			host = u.Hostname()
 		}
-		r.hosts = append(r.hosts, host)
-		r.urls = append(r.urls, f.URL)
-		r.names[f.URL] = f.Name
+		set.hosts = append(set.hosts, host)
+		set.urls = append(set.urls, f.URL)
+		set.names[f.URL] = f.Name
 	}
-	return r
+	return set
+}
+
+// New serves feeds from st, refreshing them through fetcher, and records Subscribe's additions in subs.
+// Feeds must satisfy config.Load's invariants; a nil logger discards failures.
+func New(feeds []config.Feed, subs Subscriptions, st *store.Store, fetcher Fetcher, log *slog.Logger) *Reader {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Reader{
+		subs:     subs,
+		store:    st,
+		fetcher:  fetcher,
+		log:      log,
+		now:      time.Now,
+		set:      newFeedSet(slices.Clone(feeds)),
+		failures: make(map[string]failure),
+	}
+}
+
+func (r *Reader) current() *feedSet {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.set
 }
 
 // Feeds lists the configured subscriptions in config order; the caller may modify the result.
-func (r *Reader) Feeds() []config.Feed { return slices.Clone(r.feeds) }
+func (r *Reader) Feeds() []config.Feed { return slices.Clone(r.current().feeds) }
+
+// Subscribe checks that f fetches as a feed, appends it to the configuration, and adds it to the river
+// with the posts it fetched. A failure leaves the configuration and river as they were.
+func (r *Reader) Subscribe(ctx context.Context, f config.Feed) (config.Feed, error) {
+	resolved := f
+	if err := resolved.Normalize(); err != nil {
+		return config.Feed{}, err
+	}
+	if err := r.unsubscribed(resolved.URL); err != nil {
+		return config.Feed{}, err
+	}
+	// Read before fetching, as a refresh does, so a save elsewhere meanwhile is not overwritten.
+	state, err := r.store.FeedState(ctx, resolved.URL)
+	if err != nil {
+		return config.Feed{}, err
+	}
+	fetched, err := r.fetcher.Fetch(ctx, resolved.URL, feed.Validators{ETag: state.ETag, LastModified: state.LastModified})
+	if err != nil {
+		return config.Feed{}, err
+	}
+
+	r.adding.Lock()
+	defer r.adding.Unlock()
+	if err := r.unsubscribed(resolved.URL); err != nil {
+		return config.Feed{}, err
+	}
+	added, err := r.subs.Add(f)
+	if err != nil {
+		return config.Feed{}, err
+	}
+	// Saved before joining the set, so no round refetches it; after a failure, the next round does.
+	err = r.store.SaveRefresh(ctx, state, storedRefresh(fetched))
+	if err != nil && !errors.Is(err, store.ErrRefreshConflict) && ctx.Err() == nil {
+		r.log.Warn("save new subscription", "feed", added.URL, "error", err)
+	}
+	r.mu.Lock()
+	r.set = newFeedSet(append(slices.Clone(r.set.feeds), added))
+	r.mu.Unlock()
+	return added, nil
+}
+
+func (r *Reader) unsubscribed(feedURL string) error {
+	if _, ok := r.current().names[feedURL]; ok {
+		return fmt.Errorf("already subscribed to %s", feedURL)
+	}
+	return nil
+}
 
 // Timeline reads one page of the river across every configured subscription.
 // Calls do not share a snapshot; refreshes and date corrections can move posts between pages.
 func (r *Reader) Timeline(ctx context.Context, query Query) (Page, error) {
+	set := r.current()
 	page, err := r.store.Timeline(ctx, store.TimelineQuery{
-		FeedURLs: r.urls, Before: query.Before, Through: query.Through, After: query.After, Limit: query.Limit,
+		FeedURLs: set.urls, Before: query.Before, Through: query.Through, After: query.After, Limit: query.Limit,
 	})
 	if err != nil {
 		return Page{}, err
 	}
 	items := make([]Item, len(page.Items))
 	for i, item := range page.Items {
-		items[i] = Item{TimelineItem: item, FeedName: r.names[item.FeedURL]}
+		items[i] = Item{TimelineItem: item, FeedName: set.names[item.FeedURL]}
 	}
 	return Page{Items: items, Next: page.Next, Newer: page.Newer}, nil
 }

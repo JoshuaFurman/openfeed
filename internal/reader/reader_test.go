@@ -61,7 +61,7 @@ func newReaderAt(t *testing.T, path string, feeds []config.Feed, fetcher Fetcher
 	t.Helper()
 	st := openStore(t, path)
 	c := &clock{now: time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)}
-	r := New(feeds, st, fetcher, nil)
+	r := New(feeds, nil, st, fetcher, nil)
 	r.now = c.Now
 	return r, st, c
 }
@@ -230,7 +230,7 @@ func TestTimelineLabelsAndSelection(t *testing.T) {
 		t.Errorf("Feeds = %v, want the configured feeds unchanged", got)
 	}
 
-	empty := New(nil, st, fetchFunc(func(context.Context, string, feed.Validators) (feed.Result, error) {
+	empty := New(nil, nil, st, fetchFunc(func(context.Context, string, feed.Validators) (feed.Result, error) {
 		t.Error("empty config fetched")
 		return feed.Result{}, nil
 	}), nil)
@@ -300,7 +300,7 @@ func TestSeenBookkeeping(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	closed := New(feeds, st, nil, r.log)
+	closed := New(feeds, nil, st, nil, r.log)
 	closed.Reached(middle)
 	if err := closed.SaveSeen(t.Context()); err == nil || !strings.Contains(logs.String(), "save seen position") {
 		t.Errorf("store failure returned %v and logged %q", err, logs.String())

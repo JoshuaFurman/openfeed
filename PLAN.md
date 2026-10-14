@@ -6,47 +6,26 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** v0.1's read-only river: configuration, feed fetching, the SQLite store, reader
-  orchestration, command wiring (`56309c5`), and the TUI river (`c0b67a3`) with refresh (`ee8f22f`)
-  and resuming where the reader left off (`11c99ad`). Settled decisions and contracts are in `AGENTS.md`.
+- **Completed:** v0.1's read-only river, released as `v0.1.0`: configuration, feed fetching, the
+  SQLite store, reader orchestration, command wiring, and the TUI river with refresh and resuming where
+  the reader left off. Settled decisions and contracts are in `AGENTS.md`.
 - **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
   "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
-  a double-tap of `k`/↑ at the newest post, and saves the furthest reached position: after 2s idle,
-  after refreshes, and at exit. First launch opens at the newest post. Signals exit 130/143 quietly and
-  still save. `openfeed --version` prints the build's module version.
-- **Implementation in progress: v0.1.0 release preparation.** Implemented and verified, but not yet
-  reviewed or committed:
-  - `--version` from the build info, parsed with stdlib `flag`. `-h` exits 0; unknown flags and
-    positional arguments print usage and exit 2 (`TestParseArgs`).
-  - `.goreleaser.yaml` and `.github/workflows/release.yml`: on a pushed `vX.Y.Z` tag, archives for
-    darwin/linux/windows × amd64/arm64, checksums, a changelog, and a Homebrew cask pushed to
-    `JoshuaFurman/homebrew-tap`.
-  - Retention settled: nothing deletes in v0.1 ([`AGENTS.md`](AGENTS.md#2-decisions-made), Retention),
-    closing the open question.
-  - README: status, install paths, `--version`, what v0.1 does not do yet, and the database contents.
-- **Last verification (release preparation):**
+  a double-tap of `k`/↑ at the newest post, and saves the furthest reached position. `n` adds a feed
+  from a popup; a first launch with no subscriptions opens the empty river and says to press `n`.
+- **Implementation in progress: adding feeds in the TUI** (see [below](#v02--adding-feeds-in-the-tui)).
+  Implemented and verified, but not yet reviewed or committed.
+- **Last verification (adding feeds):**
   - formatting, uncached full race and no-cgo tests, `go vet`, `staticcheck`, `go mod verify`, and
     `go mod tidy -diff`;
-  - `--version` in a scratch copy: a pseudo-version untagged, `v0.1.0` at the tag, and `v0.1.0+dirty`
-    with uncommitted changes. `-h` exits 0; `serve` and `--bogus` exit 2;
-  - GoReleaser v2.18.2 `check`, and a snapshot release at a scratch `v0.1.0` tag: six archives with
-    LICENSE and README, a cask with macOS and Linux URLs, and binaries printing `openfeed v0.1.0`;
-  - v0.1 acceptance in a real pseudo-terminal, with one local feed and one dead feed. A first launch
-    showed "No posts yet. Refreshing…", filled in the local posts, named the dead feed's failure, moved
-    with `j`, and exited 0. With the server stopped and both feeds due, a relaunch showed the cached
-    river below "You left off here" and "2 feeds failing: local, dead (details in the log)", exit 0.
-    With empty XDG directories, the first run wrote the starter config and exited 0.
-- **Next action:** the user reviews and commits the release preparation, then publishes:
-  1. In GitHub's email settings, confirm the commit address is verified, and that "Block command line
-     pushes that expose my email" is off.
-  2. Create the empty public repository `JoshuaFurman/openfeed`, add it as `origin`, push `main`, and
-     wait for CI.
-  3. Create the public repository `JoshuaFurman/homebrew-tap` with a README, so GoReleaser has a
-     default branch to commit the cask to.
-  4. Create a fine-grained token for `homebrew-tap` only, with Contents read and write, and save it as
-     the `HOMEBREW_TAP_GITHUB_TOKEN` Actions secret in `openfeed`.
-  5. Tag the CI-green commit `v0.1.0` and push the tag. The release workflow publishes.
-  6. Check the release page, `brew install --cask joshuafurman/tap/openfeed`, and `openfeed --version`.
+  - in a real pseudo-terminal (tmux, 90×22) with empty XDG directories and a local HTTP feed: the
+    first launch opened "No subscriptions yet. Press n to add a feed."; `n` opened the popup with the
+    terminal cursor in the URL field; an HTML page showed "parse feed …: failed to detect feed type"
+    wrapped in the popup; correcting the URL, Tab to a name and tags, and Enter showed the feed's posts
+    and "Subscribed to local."; the starter config kept its comments with the block appended. Typing
+    `qqq` into a popup did not quit, Esc closed it, `q` exited 0, and a relaunch read the subscription.
+- **Next action:** the user reviews the change. Suggested commit:
+  `feat(tui): add feeds from a popup with n`. Then decide whether it ships as `v0.2.0`.
 
 ### Keeping this useful
 
@@ -348,13 +327,50 @@ $ openfeed
 
 No subscription-management commands, reader pane, web UI, or real AI providers in v0.1.
 
+## v0.2 — adding feeds in the TUI
+
+`n` opens a popup for a feed's URL, optional name, and optional comma-separated tags. Approved design
+(user decisions, 2026-10-13): fetch before saving, all three fields, open the TUI with no
+subscriptions, and append to `config.toml`. Recorded in [`AGENTS.md`](AGENTS.md#2-decisions-made)
+(Adding subscriptions, Config writes) and [Adding a feed](AGENTS.md#adding-a-feed).
+
+- [x] `config.Config.Add`: rereads the file, validates it plus the block with `Load`'s parser, and
+  appends with one `O_APPEND` write. `Feed.Normalize` is exported for the reader's offline checks.
+- [x] `reader.Reader.Subscribe`: offline validation and duplicate check, fetch with cached validators,
+  config append, save, and a copy-on-write feed set that reads and rounds snapshot.
+- [x] TUI popup over the river, empty-config launch, name column resize, and reload after subscribing.
+- [x] README, `AGENTS.md`, and real-terminal verification.
+
+**Acceptance coverage:**
+
+- `internal/config/config_test.go`: appends exactly after comments, an unterminated last line, and an
+  empty file; omits a blank name; escapes quotes and backslashes; leaves the loaded feeds alone.
+  Rejections (missing URL, bad scheme, a host-case duplicate, a file broken since launch) write
+  nothing. A duplicate added by hand since `Load` is caught; a deleted file is recreated as the
+  starter plus the block, mode 0600; a symlinked config stays a symlink with its target's mode.
+- `internal/reader/subscribe_test.go`: the new feed's posts show without a refresh, labeled, and the
+  next round finds it not due; rejections (invalid, already subscribed, fetch failure, config
+  failure) change nothing and fetch only when they should; a hidden cache revalidates with its
+  validators (304) under the new name; a failed save keeps the subscription and logs; two concurrent
+  subscribes to one URL add it once while reads run alongside (race detector).
+- `internal/tui/add_test.go`: typing, Tab/Shift-Tab/arrows, and Enter subscribe with trimmed URL,
+  name, and tags; posts land in place with the cursor kept and the name column widened; river keys
+  (`q`, `j`, `o`, …) type into the popup; Ctrl-C quits; Esc closes and a reopened popup starts empty.
+  Errors (empty URL, bad scheme, fetch failure with an escape sequence and a bidi override) stay in
+  the popup, sanitized, keeping the URL; typing clears them. An abandoned check's error is dropped,
+  and one that subscribes anyway still lands. Pasted text is sanitized. The cursor sits after the
+  typed URL, and lines fit 80, 40, and 20 columns. A first subscription fills an empty river.
+- `internal/tui/tui_test.go`: the no-subscriptions screen.
+- `cmd/openfeed/main_test.go`: a first launch presents the empty river, and subscribing through it
+  appends to the real starter config and shows the post.
+
 ## Open design questions
 
 Resolve a question before the work it affects, not every future question up front.
 
 | Question | Decide before | What needs comparing |
 |---|---|---|
-| TOML round-tripping | Subscription-management commands, later | Preserve comments/formatting when editing subscriptions programmatically; no library choice settled. v0.1 only reads config. |
+| TOML round-tripping | Removing or renaming subscriptions in the app | Preserve comments/formatting when changing existing blocks; no library choice settled. Adding is settled: append a block ([`AGENTS.md`](AGENTS.md#2-decisions-made), Config writes). |
 
 ## Later, roughly in order
 
@@ -364,7 +380,8 @@ Resolve a question before the work it affects, not every future question up fron
   `AUTOINCREMENT`, so a deleted highest ID is never reused.
 - [ ] Sign and notarize the macOS binaries, replacing the cask's quarantine hook.
 - [ ] Update `ci.yml` to `actions/checkout@v7` and `actions/setup-go@v7`, matching the release workflow.
-- [ ] Feed management commands and OPML import/export, after solving TOML round-tripping.
+- [ ] Removing and renaming subscriptions in the app, and OPML import/export, after solving TOML
+  round-tripping. Adding is done (`n`).
 - [ ] FTS5 search.
 - [ ] Feed/tag filters over the same river.
 - [ ] `openfeed serve`: localhost UI using the same core, embedded templates, and htmx.

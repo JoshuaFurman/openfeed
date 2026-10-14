@@ -73,18 +73,93 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", cfg.FilePath(), err)
 	}
 
-	md, err := toml.Decode(string(data), cfg)
+	if cfg.Feeds, err = parse(cfg.FilePath(), data); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Add appends feed to config.toml as a new [[feed]] block, leaving the rest of the file as written,
+// and returns it as Load would resolve it. Nothing is written unless the file still loads with it.
+//
+// Add rereads the file, so it catches a duplicate added by hand since Load; it does not change c.Feeds.
+func (c *Config) Add(feed Feed) (Feed, error) {
+	block, err := encodeFeed(feed)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", cfg.FilePath(), err)
+		return Feed{}, err
+	}
+	data, err := os.ReadFile(c.FilePath())
+	var addition string
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		addition = starterConfig + "\n" + block
+	case err != nil:
+		return Feed{}, fmt.Errorf("read %s: %w", c.FilePath(), err)
+	case len(data) == 0:
+		addition = block
+	case data[len(data)-1] == '\n':
+		addition = "\n" + block
+	default:
+		addition = "\n\n" + block // The file's last line is unterminated.
+	}
+	feeds, err := parse(c.FilePath(), append(data, addition...))
+	if err != nil {
+		return Feed{}, err
+	}
+
+	// Appending rather than replacing keeps symlinks, permissions, and concurrent appends intact.
+	file, err := os.OpenFile(c.FilePath(), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return Feed{}, fmt.Errorf("open %s: %w", c.FilePath(), err)
+	}
+	_, err = file.WriteString(addition)
+	if err == nil {
+		err = file.Sync()
+	}
+	if err = errors.Join(err, file.Close()); err != nil {
+		return Feed{}, fmt.Errorf("write %s: %w", c.FilePath(), err)
+	}
+	return feeds[len(feeds)-1], nil
+}
+
+// encodeFeed renders feed as a TOML block, omitting a blank name so the host fallback stays implicit.
+func encodeFeed(feed Feed) (string, error) {
+	type block struct {
+		URL  string   `toml:"url"`
+		Name string   `toml:"name,omitempty"`
+		Tags []string `toml:"tags,omitempty"`
+	}
+	explicitName := strings.TrimSpace(feed.Name)
+	if err := feed.Normalize(); err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	enc := toml.NewEncoder(&out)
+	enc.Indent = ""
+	err := enc.Encode(struct {
+		Feed []block `toml:"feed"`
+	}{[]block{{URL: feed.URL, Name: explicitName, Tags: feed.Tags}}})
+	if err != nil {
+		return "", fmt.Errorf("encode feed: %w", err)
+	}
+	return out.String(), nil
+}
+
+// parse decodes and validates config.toml's contents; path only labels errors.
+func parse(path string, data []byte) ([]Feed, error) {
+	var cfg Config
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	// Unknown keys are almost always typos in a hand-edited file.
 	if unknown := md.Undecoded(); len(unknown) > 0 {
-		return nil, fmt.Errorf("%s: unknown setting %q", cfg.FilePath(), unknown[0].String())
+		return nil, fmt.Errorf("%s: unknown setting %q", path, unknown[0].String())
 	}
 	if err := cfg.normalize(); err != nil {
-		return nil, fmt.Errorf("%s: %w", cfg.FilePath(), err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg.Feeds, nil
 }
 
 // FilePath reports where config.toml lives, whether or not it exists yet.
@@ -102,7 +177,7 @@ func (c *Config) LogPath() string { return filepath.Join(c.paths.state, "openfee
 func (c *Config) normalize() error {
 	seenAt := make(map[string]int, len(c.Feeds))
 	for i := range c.Feeds {
-		if err := c.Feeds[i].normalize(); err != nil {
+		if err := c.Feeds[i].Normalize(); err != nil {
 			return fmt.Errorf("feed %d: %w", i+1, err)
 		}
 		if first, dup := seenAt[c.Feeds[i].URL]; dup {
@@ -113,9 +188,9 @@ func (c *Config) normalize() error {
 	return nil
 }
 
-// normalize validates one subscription and fills in derived defaults. It must
-// not touch the network; openfeed has to start offline.
-func (f *Feed) normalize() error {
+// Normalize validates one subscription as Load does and fills in derived defaults.
+// It never touches the network; openfeed has to start offline.
+func (f *Feed) Normalize() error {
 	f.URL = strings.TrimSpace(f.URL)
 	if f.URL == "" {
 		return errors.New("missing url")

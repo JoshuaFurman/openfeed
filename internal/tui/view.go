@@ -13,7 +13,7 @@ import (
 const (
 	ageWidth = 8 // Fits "Jan 2006", the widest age.
 	title    = " openfeed"
-	hints    = "j/k move · g newest · o open · q quit "
+	hints    = "j/k move · g newest · o open · n add · q quit "
 )
 
 var (
@@ -28,6 +28,8 @@ func (m *model) View() tea.View {
 		lines = append(lines, m.header())
 	}
 	switch {
+	case m.feedCount == 0:
+		lines = append(lines, fit(" No subscriptions yet. Press n to add a feed.", m.width))
 	case !m.loaded:
 		lines = append(lines, fit(" Loading…", m.width))
 	case m.headFailed:
@@ -58,6 +60,9 @@ func (m *model) View() tea.View {
 	}
 
 	view := tea.NewView(strings.Join(lines, "\n"))
+	if m.form != nil {
+		view.Content, view.Cursor = m.overlay(view.Content)
+	}
 	view.AltScreen = true
 	return view
 }

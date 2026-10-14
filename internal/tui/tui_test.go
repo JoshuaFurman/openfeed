@@ -107,7 +107,7 @@ func seed(t *testing.T, posts []post, extraFeeds ...string) (*reader.Reader, *fe
 		}
 	}
 	f := &fetcher{posts: map[string][]feed.Item{}, fails: map[string]error{}}
-	return reader.New(feeds, st, f, nil), f
+	return reader.New(feeds, &subscriptions{}, st, f, nil), f
 }
 
 // numbered makes n posts in one feed, a minute apart, newest first.
@@ -168,6 +168,12 @@ func key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "enter":
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "ctrl+c":
 		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	case "ctrl+z":
@@ -560,7 +566,12 @@ func TestResizeKeepsCursorVisible(t *testing.T) {
 }
 
 func TestStatusAndEmptyStates(t *testing.T) {
-	empty, _ := seed(t, nil)
+	unsubscribed, _ := seed(t, nil)
+	if got := strings.Join(screen(start(t, unsubscribed, 80, 6, noOpen(t))), "\n"); !strings.Contains(got, "No subscriptions yet. Press n to add a feed.") {
+		t.Errorf("no subscriptions screen:\n%s", got)
+	}
+
+	empty, _ := seed(t, nil, "alpha")
 	m := build(t, empty, noOpen(t))
 	m.refreshing = true // As if the launch refresh were still running.
 	if !strings.Contains(strings.Join(screen(m), "\n"), "Loading…") {

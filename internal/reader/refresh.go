@@ -81,16 +81,17 @@ func (r *Reader) Refresh(ctx context.Context) (Report, error) {
 }
 
 func (r *Reader) runRound(ctx context.Context, current *round) (Report, error) {
+	set := r.current()
 	slots := make(map[string]chan struct{})
-	for _, host := range r.hosts {
+	for _, host := range set.hosts {
 		if slots[host] == nil {
 			slots[host] = make(chan struct{}, hostSlots)
 		}
 	}
-	report := Report{Feeds: make([]FeedResult, len(r.feeds))}
+	report := Report{Feeds: make([]FeedResult, len(set.feeds))}
 	var wg sync.WaitGroup
-	for i, f := range r.feeds {
-		wg.Go(func() { report.Feeds[i] = r.refreshFeed(ctx, f, slots[r.hosts[i]]) })
+	for i, f := range set.feeds {
+		wg.Go(func() { report.Feeds[i] = r.refreshFeed(ctx, f, slots[set.hosts[i]]) })
 	}
 	wg.Wait()
 
