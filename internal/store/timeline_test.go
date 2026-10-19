@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -375,5 +376,36 @@ func TestTimelineTimestampRange(t *testing.T) {
 	got := collectTimeline(t, s, TimelineQuery{FeedURLs: []string{url}, Before: &items[0].Position, Through: &items[len(items)-1].Position, Limit: 1})
 	if !slices.Equal(got, items[1:]) {
 		t.Error("range lost extreme dates or nanoseconds")
+	}
+}
+
+func TestTimelineCursorText(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "openfeed.db"))
+	const url = "https://example.com/feed"
+	at := sampleRefresh().FetchedAt
+	saveRefresh(t, s, url, Refresh{Items: []RefreshItem{timelineEntry("a", at), timelineEntry("b", at.Add(time.Hour))}, FetchedAt: fixtureFetch()})
+	head := readTimeline(t, s, TimelineQuery{FeedURLs: []string{url}, Limit: 1})
+	token, err := head.Next.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded TimelineCursor
+	if err := decoded.UnmarshalText(token); err != nil || decoded != *head.Next {
+		t.Fatalf("round trip of %q = %+v, %v; want %+v", token, decoded, err, *head.Next)
+	}
+	if got := timelineTitles(readTimeline(t, s, TimelineQuery{FeedURLs: []string{url}, Before: &decoded}).Items); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("page before decoded token = %v", got)
+	}
+	if _, err := (TimelineCursor{}).MarshalText(); err == nil {
+		t.Error("zero position encoded")
+	}
+	date, _, _ := strings.Cut(string(token), "~")
+	for _, bad := range []string{
+		"", "~", date, date + "~", date + "~0", date + "~-1", date + "~01", date + "~1x", "2026-01-01~1",
+		"2026-01-01T00:00:00Z~1", strings.Replace(date, "Z", "+00:00", 1) + "~1", date + "~99999999999999999999",
+	} {
+		if err := new(TimelineCursor).UnmarshalText([]byte(bad)); err == nil {
+			t.Errorf("UnmarshalText(%q) accepted", bad)
+		}
 	}
 }

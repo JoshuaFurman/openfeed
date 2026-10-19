@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,27 @@ type TimelineCursor struct {
 // It returns a negative value when c is older than other and zero when they are equal.
 func (c TimelineCursor) Compare(other TimelineCursor) int {
 	return cmp.Or(cmp.Compare(c.date, other.date), cmp.Compare(c.id, other.id))
+}
+
+// MarshalText encodes the position as an opaque URL-safe token, for carrying it through a client.
+// The token is not a persistence format; store positions with AdvanceSeen.
+func (c TimelineCursor) MarshalText() ([]byte, error) {
+	if c.date == "" || c.id <= 0 {
+		return nil, errors.New("position was not obtained from Timeline or SeenPosition")
+	}
+	return fmt.Appendf(nil, "%s~%d", c.date, c.id), nil
+}
+
+// UnmarshalText decodes a token from MarshalText, rejecting anything MarshalText could not produce.
+func (c *TimelineCursor) UnmarshalText(text []byte) error {
+	date, id, ok := strings.Cut(string(text), "~")
+	parsed, err := time.Parse(timestampLayout, date)
+	n, idErr := strconv.ParseInt(id, 10, 64)
+	if !ok || err != nil || parsed.Format(timestampLayout) != date || idErr != nil || n <= 0 || strconv.FormatInt(n, 10) != id {
+		return fmt.Errorf("invalid position %q", text)
+	}
+	*c = TimelineCursor{date: date, id: ItemID(n)}
+	return nil
 }
 
 // TimelineItem is cached publisher data with a stable identity and its position when queried.

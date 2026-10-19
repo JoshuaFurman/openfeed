@@ -1,4 +1,4 @@
-// Command openfeed is a TUI-first RSS reader.
+// Command openfeed is a TUI-first RSS reader; `openfeed serve` serves the same river as a web page.
 package main
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,18 +18,19 @@ import (
 	"github.com/JoshuaFurman/openfeed/internal/config"
 	"github.com/JoshuaFurman/openfeed/internal/feed"
 	"github.com/JoshuaFurman/openfeed/internal/reader"
+	"github.com/JoshuaFurman/openfeed/internal/server"
 	"github.com/JoshuaFurman/openfeed/internal/store"
 	"github.com/JoshuaFurman/openfeed/internal/tui"
 )
 
 func main() {
-	showVersion, err := parseArgs(os.Args[1:], os.Stderr)
+	cmd, err := parseArgs(os.Args[1:], os.Stderr)
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		return
 	case err != nil:
 		os.Exit(2)
-	case showVersion:
+	case cmd.version:
 		fmt.Println("openfeed", version())
 		return
 	}
@@ -41,7 +43,11 @@ func main() {
 		signal.Stop(signals) // A second signal during cleanup uses the default behavior and exits.
 		cancel(interrupted{received})
 	}()
-	err = run(ctx, &http.Client{}, tui.Run)
+	show := func(ctx context.Context, river *reader.Reader, _ *slog.Logger) error { return tui.Run(ctx, river) }
+	if cmd.serve {
+		show = serve(cmd.addr, os.Stderr)
+	}
+	err = run(ctx, &http.Client{}, show)
 	signal.Stop(signals)
 
 	code, report := exitStatus(err, context.Cause(ctx))
@@ -51,15 +57,37 @@ func main() {
 	os.Exit(code)
 }
 
-const usage = "usage: openfeed [--version]\n\n  --version  print the version and exit\n"
+const (
+	defaultAddr = ":80"
+	usage       = `usage: openfeed [--version]
+       openfeed serve [--addr host:port]
+
+  --version  print the version and exit
+
+  serve      serve the river as a web page, without authentication
+  --addr     listen address (default ":80", every interface)
+`
+)
+
+// command is what the command line asks for: the TUI by default.
+type command struct {
+	version bool
+	serve   bool
+	addr    string
+}
 
 // parseArgs reads the command line, writing usage and mistakes to stderr.
-// Asking for help returns flag.ErrHelp; positional arguments are mistakes, not ignored.
-func parseArgs(args []string, stderr io.Writer) (showVersion bool, err error) {
+// Asking for help returns flag.ErrHelp; unexpected arguments are mistakes, not ignored.
+func parseArgs(args []string, stderr io.Writer) (cmd command, err error) {
 	flags := flag.NewFlagSet("openfeed", flag.ContinueOnError)
 	flags.SetOutput(io.Discard) // The flag package's own messages would bypass Sanitize.
 	flags.Usage = func() {}
-	flags.BoolVar(&showVersion, "version", false, "")
+	if len(args) > 0 && args[0] == "serve" {
+		cmd.serve, args = true, args[1:]
+		flags.StringVar(&cmd.addr, "addr", defaultAddr, "")
+	} else {
+		flags.BoolVar(&cmd.version, "version", false, "")
+	}
 	err = flags.Parse(args)
 	if err == nil && flags.NArg() > 0 {
 		err = fmt.Errorf("unexpected argument %q", flags.Arg(0))
@@ -69,9 +97,23 @@ func parseArgs(args []string, stderr io.Writer) (showVersion bool, err error) {
 			fmt.Fprintln(stderr, tui.Sanitize(err.Error()))
 		}
 		fmt.Fprint(stderr, usage)
-		return false, err
+		return command{}, err
 	}
-	return showVersion, nil
+	return cmd, nil
+}
+
+// serve presents the river over HTTP on addr, announcing the address on out once listening.
+func serve(addr string, out io.Writer) present {
+	return func(ctx context.Context, river *reader.Reader, log *slog.Logger) error {
+		listener, err := new(net.ListenConfig).Listen(ctx, "tcp", addr)
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("%w (ports below 1024 may need privileges; try --addr :8080)", err)
+		} else if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "openfeed listening on %s\n", tui.Sanitize(listener.Addr().String()))
+		return server.Serve(ctx, listener, river, log)
+	}
 }
 
 // version is the module version Go stamped into the build: a release tag, a pseudo-version
@@ -125,8 +167,8 @@ func onlyCancellation(err error) bool {
 	}
 }
 
-// present shows the river; tests substitute one that inspects it.
-type present func(ctx context.Context, river tui.River) error
+// present shows the river, logging to log; tests substitute one that inspects it.
+type present func(ctx context.Context, river *reader.Reader, log *slog.Logger) error
 
 func run(ctx context.Context, httpClient feed.HTTPClient, show present) (err error) {
 	cfg, err := config.Load()
@@ -148,6 +190,6 @@ func run(ctx context.Context, httpClient feed.HTTPClient, show present) (err err
 		return err
 	}
 	defer func() { err = errors.Join(err, st.Close()) }()
-	river := reader.New(cfg.Feeds, cfg, st, feed.NewClient(httpClient), slog.New(slog.NewTextHandler(logFile, nil)))
-	return show(ctx, river)
+	log := slog.New(slog.NewTextHandler(logFile, nil))
+	return show(ctx, reader.New(cfg.Feeds, cfg, st, feed.NewClient(httpClient), log), log)
 }

@@ -6,32 +6,25 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** v0.1's read-only river, released as `v0.1.0`: configuration, feed fetching, the
-  SQLite store, reader orchestration, command wiring, and the TUI river with refresh and resuming where
-  the reader left off. Settled decisions and contracts are in `AGENTS.md`.
-  Adding feeds in the TUI (`b919f54`) and filtering by tag (`b673c69`) are committed.
-- **Current behavior:** `openfeed` resumes the TUI river where the reader left off, below a
-  "You left off here" divider, with newer posts above. It refreshes in the background at launch and on
-  a double-tap of `k`/↑ at the newest post, and saves the furthest reached position. `n` adds a feed
-  from a popup; a first launch with no subscriptions opens the empty river and says to press `n`.
-  `/` filters the river by one tag, and Esc returns to the whole river. A colored column shows each
-  post's tags (uncommitted).
-- **Implementation in progress: the tag column** (see [below](#v02--filtering-by-tag)).
-  Implemented and verified, but not yet reviewed or committed.
-- **Last verification (tag filters and the tag column):**
-  - formatting, uncached full race and no-cgo tests, `go vet`, and `staticcheck`;
-  - in a real pseudo-terminal (tmux, 90×22) with empty XDG directories and three local HTTP feeds
-    tagged `tech`, `news` + `Tech`, and none: `/` listed All posts, tech, and news, starting on tech.
-    From a `misc` post, Enter showed `#tech` with the cursor on the newest tagged post below it.
-    Reading upward and pressing Esc returned to the `misc` post. New posts pulled inside the filter
-    showed only tagged feeds' posts. After reading them in the filter, quitting, and relaunching,
-    "You left off here" stayed below all the new posts. At 30×9 the picker fit, and `q` closed it
-    without quitting. A second run (90×14) showed the tag column, `tech` in cyan and `news` in
-    magenta (`newswire`'s `Tech` drawn as `tech`), the selected row's tags uncolored inside its
-    reverse video, and no colors with `NO_COLOR=1`.
-- **Next action:** the user reviews the change. Suggested commit:
-  `feat(tui): show each post's tags in a colored column`. Then decide whether adding feeds, tag
-  filters, and the tag column ship as `v0.2.0`.
+- **Completed:** v0.1's read-only river, released as `v0.1.0`. Adding feeds in the TUI (`b919f54`),
+  filtering by tag (`b673c69`), and the tag column (`e5907be`) are committed.
+- **Current behavior:** `openfeed` resumes the TUI river below a "You left off here" divider, refreshes
+  at launch and on a double-tap of `k`/↑, adds feeds with `n`, and filters by tag with `/`.
+  `openfeed serve` (uncommitted) serves the same river as a mobile-first web page.
+- **Implementation in progress: the web river** (see [below](#v03--web-river)). Implemented and
+  verified, not yet reviewed or committed.
+- **Last verification (web river):**
+  - formatting, `go vet`, `staticcheck`, and uncached full race and no-cgo tests;
+  - the real binary with empty XDG directories and three local feeds (one 404ing, one with 120 posts):
+    headless Chrome emulating a 390×844 phone ran htmx under the CSP with no console errors, showed
+    "dead is failing to refresh", and loaded 124 of 124 posts once each by scrolling, with no
+    horizontal overflow. After a newer post was added and its gap passed, the old page's refresh
+    returned "New posts ↑" and the reload showed it on top. Default `:80` bound unprivileged on macOS
+    and answered on the LAN address; SIGTERM exited 143 quietly; an invalid port printed a clean error.
+    Screenshots were not inspected (image reading is disabled in this session).
+- **Next action:** the user opens it on a phone and reviews the change. Suggested commits:
+  `feat(store): encode timeline positions as text` and `feat(server): serve the river on the web`.
+  Then: tag filters on the web.
 
 ### Keeping this useful
 
@@ -408,6 +401,41 @@ set the store already selects by.
 - `internal/tui/tui_test.go`: existing tests now reach the resume through `windowRead`, and an
   untagged river renders exactly as before.
 
+## v0.3 — web river
+
+`openfeed serve` serves the river as a mobile-first web page. Approved design (user decisions,
+2026-10-18): Go templates + vendored htmx, no Node or hand-written JS; read on a phone over LAN or
+Tailscale; listen on `:80`, every interface, without authentication; no divider, but a page's launch
+refresh reaches its shown head, as `g`; refresh on load and pull only; excerpts; articles in a new tab;
+stdlib `flag` until the CLI grows. Recorded in [`AGENTS.md`](AGENTS.md#2-decisions-made) (Web UI, Web
+exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#web-river).
+
+- [x] `store.TimelineCursor` text tokens, strict on decode.
+- [x] `internal/server`: the river page, older-page fragments, the refresh notice and pill, excerpts,
+  CSRF protection, CSP and referrer headers, immutable embedded assets, graceful shutdown with a
+  final seen save.
+- [x] `openfeed serve [--addr]`, logging to the same file as the TUI.
+- [x] README, `AGENTS.md`, and a real-browser check at phone size.
+- [ ] Tag filters on the web: tag chips or a picker, `?tag=` on every route, filtered views never reach.
+- [ ] Adding feeds on the web: a form over `Reader.Subscribe`.
+- [ ] Excerpts in the TUI.
+
+**Acceptance coverage:**
+
+- `internal/store/timeline_test.go`: tokens round-trip and page from the decoded position; the zero
+  position does not encode; malformed, non-canonical, zero, negative, and overflowing tokens fail.
+- `internal/server/excerpt_test.go`: markup, entities, inline joins and block breaks, hidden and
+  unclosed script/style, attributes, comments, control characters, broken markup, and truncation.
+- `internal/server/server_test.go`: rows with names, colored tags, excerpts, links, and dates; a post
+  without a URL has no link; an excerpt repeating the title is dropped; feed text and config labels
+  are escaped. Older pages reach every post once, as fragments. Bad tokens are 400s. The pill appears
+  only when a newer post exists; failing feeds are named. Rendering never reaches; the refresh reaches
+  the shown head, and a forged head is capped at the real one. Empty states, cross-origin POSTs
+  rejected without fetching, security headers, immutable assets, templates not served, and `Serve`
+  stopping on cancellation and saving the position.
+- `cmd/openfeed/main_test.go`: `serve` and `--addr` parsing and mistakes; a real listener serving
+  the refreshed river and stopping on cancellation; a listen failure announced nothing.
+
 ## Open design questions
 
 Resolve a question before the work it affects, not every future question up front.
@@ -429,5 +457,4 @@ Resolve a question before the work it affects, not every future question up fron
 - [ ] FTS5 search.
 - [ ] Feed filters over the same river. Tag filters are done (`/`); a feed filter could join the same
   picker and `Query`.
-- [ ] `openfeed serve`: localhost UI using the same core, embedded templates, and htmx.
 - [ ] Optional AI features behind the provider seam; no real providers until reading is solid.

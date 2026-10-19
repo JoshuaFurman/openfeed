@@ -1,0 +1,188 @@
+:root {
+  --bg: #ffffff;
+  --fg: #0f1419;
+  --muted: #536471;
+  --line: #eff3f4;
+  --accent: #1d9bf0;
+  --hover: #f7f9f9;
+  --t0: #0e7490; --t1: #a21caf; --t2: #a16207; --t3: #15803d; --t4: #1d4ed8; --t5: #b91c1c;
+  --t6: #0891b2; --t7: #c026d3; --t8: #ca8a04; --t9: #16a34a; --t10: #2563eb; --t11: #dc2626;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --fg: #e7e9ea;
+    --muted: #71767b;
+    --line: #2f3336;
+    --hover: #080808;
+    --t0: #22d3ee; --t1: #e879f9; --t2: #facc15; --t3: #4ade80; --t4: #60a5fa; --t5: #f87171;
+    --t6: #67e8f9; --t7: #f0abfc; --t8: #fde047; --t9: #86efac; --t10: #93c5fd; --t11: #fca5a5;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0 auto;
+  max-width: 600px;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+  border-inline: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 0.75rem) max(1rem, env(safe-area-inset-right)) 0.75rem max(1rem, env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  color: var(--fg);
+  font-size: 1.25rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.notice {
+  position: sticky;
+  top: calc(env(safe-area-inset-top) + 3.5rem);
+  z-index: 3;
+  height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.pill {
+  margin-top: 0.75rem;
+  padding: 0.5rem 1.1rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.95rem;
+  text-decoration: none;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 25%);
+}
+
+.failing {
+  margin: 0.75rem 1rem 0;
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.5rem;
+  background: var(--hover);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.post {
+  position: relative;
+  padding: 0.85rem max(1rem, env(safe-area-inset-right)) 0.9rem max(1rem, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--line);
+}
+
+.post:has(.hit:active), .post:has(.hit:hover) { background: var(--hover); }
+
+.hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hit:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.meta {
+  margin: 0 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Feed text may carry bidi overrides; isolate keeps them from reordering their neighbors. */
+.feed, .tag, .title, .excerpt { unicode-bidi: isolate; }
+
+.feed { color: var(--fg); font-weight: 700; }
+
+.tag { font-weight: 600; }
+.tag::before { content: "#"; }
+.tag-0 { color: var(--t0); } .tag-1 { color: var(--t1); } .tag-2 { color: var(--t2); }
+.tag-3 { color: var(--t3); } .tag-4 { color: var(--t4); } .tag-5 { color: var(--t5); }
+.tag-6 { color: var(--t6); } .tag-7 { color: var(--t7); } .tag-8 { color: var(--t8); }
+.tag-9 { color: var(--t9); } .tag-10 { color: var(--t10); } .tag-11 { color: var(--t11); }
+
+.title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.excerpt {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.empty {
+  margin: 3rem 1.5rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.more {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding: 1.5rem 1rem;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+}
+
+.spinner {
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.htmx-indicator { visibility: hidden; }
+.htmx-request.htmx-indicator, .htmx-request .htmx-indicator { visibility: visible; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 3s; }
+}
+
+@media (max-width: 600px) {
+  body { border-inline: 0; }
+}

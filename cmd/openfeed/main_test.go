@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/JoshuaFurman/openfeed/internal/config"
 	"github.com/JoshuaFurman/openfeed/internal/reader"
-	"github.com/JoshuaFurman/openfeed/internal/tui"
 )
 
 type transport func(*http.Request) (*http.Response, error)
@@ -53,7 +53,7 @@ type presented struct {
 // capture exercises the river run hands to the TUI: a refresh through the configured client, then a read.
 // The TUI's own launch refresh is covered by the tui tests; these check run's wiring.
 func capture(t *testing.T, into *presented) present {
-	return func(ctx context.Context, river tui.River) error {
+	return func(ctx context.Context, river *reader.Reader, _ *slog.Logger) error {
 		launch, err := river.Refresh(ctx)
 		if err != nil {
 			return err
@@ -90,14 +90,14 @@ func TestRunFirstLaunchSubscribes(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(jsonFeed)), Request: req}, nil
 	})}
 	var after presented
-	err := run(t.Context(), client, func(ctx context.Context, river tui.River) error {
+	err := run(t.Context(), client, func(ctx context.Context, river *reader.Reader, _ *slog.Logger) error {
 		if feeds := river.Feeds(); len(feeds) != 0 {
 			t.Errorf("first launch feeds = %+v", feeds)
 		}
 		if _, err := river.Subscribe(ctx, config.Feed{URL: "https://new.example/feed", Name: "new"}); err != nil {
 			return err
 		}
-		return capture(t, &after)(ctx, river)
+		return capture(t, &after)(ctx, river, nil)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestRunReturnsPresenterErrors(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 	})}
 	failure := errors.New("terminal lost")
-	err := run(t.Context(), unavailable, func(context.Context, tui.River) error { return failure })
+	err := run(t.Context(), unavailable, func(context.Context, *reader.Reader, *slog.Logger) error { return failure })
 	if !errors.Is(err, failure) {
 		t.Errorf("run returned %v, want the presenter's error", err)
 	}
@@ -200,29 +200,35 @@ func TestRunReturnsPresenterErrors(t *testing.T) {
 
 func TestParseArgs(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		args        []string
-		showVersion bool
-		wantErr     bool
-		help        bool
-		stderr      string
+		name    string
+		args    []string
+		want    command
+		wantErr bool
+		help    bool
+		stderr  string
 	}{
-		{"no arguments", nil, false, false, false, ""},
-		{"double-dash version", []string{"--version"}, true, false, false, ""},
-		{"single-dash version", []string{"-version"}, true, false, false, ""},
-		{"help", []string{"--help"}, false, true, true, "usage: openfeed"},
-		{"short help", []string{"-h"}, false, true, true, "usage: openfeed"},
-		{"unknown flag", []string{"--verbose"}, false, true, false, "flag provided but not defined: -verbose\nusage: openfeed"},
-		{"future subcommand", []string{"serve"}, false, true, false, "unexpected argument \"serve\"\nusage: openfeed"},
-		{"argument after a flag", []string{"--version", "now"}, false, true, false, `unexpected argument "now"`},
-		{"escape sequence in an argument", []string{"\x1b[2J"}, false, true, false, `unexpected argument "\x1b[2J"`},
-		{"escape sequence in a flag", []string{"--\x1b[2J"}, false, true, false, "flag provided but not defined: - [2J"},
+		{"no arguments", nil, command{}, false, false, ""},
+		{"double-dash version", []string{"--version"}, command{version: true}, false, false, ""},
+		{"single-dash version", []string{"-version"}, command{version: true}, false, false, ""},
+		{"help", []string{"--help"}, command{}, true, true, "usage: openfeed"},
+		{"short help", []string{"-h"}, command{}, true, true, "usage: openfeed"},
+		{"unknown flag", []string{"--verbose"}, command{}, true, false, "flag provided but not defined: -verbose\nusage: openfeed"},
+		{"serve", []string{"serve"}, command{serve: true, addr: ":80"}, false, false, ""},
+		{"serve on an address", []string{"serve", "--addr", "127.0.0.1:8080"}, command{serve: true, addr: "127.0.0.1:8080"}, false, false, ""},
+		{"serve help", []string{"serve", "-h"}, command{}, true, true, "openfeed serve [--addr host:port]"},
+		{"serve with version", []string{"serve", "--version"}, command{}, true, false, "flag provided but not defined: -version"},
+		{"addr without serve", []string{"--addr", ":80"}, command{}, true, false, "flag provided but not defined: -addr"},
+		{"serve after a flag", []string{"--version", "serve"}, command{}, true, false, `unexpected argument "serve"`},
+		{"serve with an argument", []string{"serve", "now"}, command{}, true, false, `unexpected argument "now"`},
+		{"unknown subcommand", []string{"sync"}, command{}, true, false, `unexpected argument "sync"`},
+		{"escape sequence in an argument", []string{"\x1b[2J"}, command{}, true, false, `unexpected argument "\x1b[2J"`},
+		{"escape sequence in a flag", []string{"--\x1b[2J"}, command{}, true, false, "flag provided but not defined: - [2J"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			showVersion, err := parseArgs(tc.args, &stderr)
-			if showVersion != tc.showVersion || (err != nil) != tc.wantErr || errors.Is(err, flag.ErrHelp) != tc.help {
-				t.Errorf("parseArgs(%q) = %v, %v", tc.args, showVersion, err)
+			cmd, err := parseArgs(tc.args, &stderr)
+			if cmd != tc.want || (err != nil) != tc.wantErr || errors.Is(err, flag.ErrHelp) != tc.help {
+				t.Errorf("parseArgs(%q) = %+v, %v", tc.args, cmd, err)
 			}
 			if (tc.stderr == "" && stderr.Len() > 0) || !strings.Contains(stderr.String(), tc.stderr) {
 				t.Errorf("parseArgs(%q) wrote %q, want %q", tc.args, stderr.String(), tc.stderr)
@@ -232,6 +238,65 @@ func TestParseArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// serve listens, announces the address, serves the river, and stops when canceled.
+func TestServe(t *testing.T) {
+	configPath, _ := isolate(t)
+	writeConfig(t, configPath, "[[feed]]\nurl = \"https://a.example/feed\"\nname = \"alpha\"\n")
+	const jsonFeed = `{"version": "https://jsonfeed.org/version/1.1", "items": [
+		{"id": "1", "title": "Served post", "url": "https://a.example/1", "date_published": "2025-09-01T10:00:00Z"}
+	]}`
+	client := &http.Client{Transport: transport(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(jsonFeed)), Request: req}, nil
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	announced := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, client, serve("127.0.0.1:0", lineWriter(announced))) }()
+
+	var url string
+	select {
+	case line := <-announced:
+		url = "http://" + strings.TrimSpace(strings.TrimPrefix(line, "openfeed listening on "))
+	case err := <-done:
+		t.Fatalf("serve stopped before listening: %v", err)
+	}
+	refresh, err := http.Post(url+"/refresh", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh.Body.Close()
+	page, err := http.Get(url + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if !strings.Contains(string(body), "Served post") || !strings.Contains(string(body), "alpha") {
+		t.Errorf("page does not show the refreshed river:\n%s", body)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("serve returned %v, want cancellation", err)
+	}
+}
+
+func TestServeReportsListenFailures(t *testing.T) {
+	configPath, _ := isolate(t)
+	writeConfig(t, configPath, "")
+	var out bytes.Buffer
+	if err := run(t.Context(), http.DefaultClient, serve("256.0.0.1:0", &out)); err == nil || out.Len() > 0 {
+		t.Errorf("serve on an invalid address = %v, wrote %q", err, out.String())
+	}
+}
+
+// lineWriter sends each write to lines.
+type lineWriter chan<- string
+
+func (w lineWriter) Write(p []byte) (int, error) {
+	w <- string(p)
+	return len(p), nil
 }
 
 func TestVersionIsNeverBlank(t *testing.T) {

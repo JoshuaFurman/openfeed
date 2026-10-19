@@ -23,8 +23,8 @@ terminal, with no backlog guilt.
 - **Subscriptions never live in the database.** `rm openfeed.db` loses cached posts and your
   reading position — never a subscription.
 
-Later, the same core gets a web face (`openfeed serve`, localhost, htmx) and optional AI
-(daily digest, article summaries). openfeed is designed to be fully usable with AI turned off.
+The same river has a mobile-first web face, `openfeed serve`, for reading on your phone. Optional
+AI (daily digest, article summaries) comes later. openfeed is designed to be fully usable with AI turned off.
 
 ## Install
 
@@ -113,13 +113,35 @@ here", because it passes over posts the filter hides.
 | `q` or Ctrl-C | Quit |
 | Ctrl-Z | Suspend to the shell (`fg` returns) |
 
+### On your phone
+
+```sh
+openfeed serve                  # every interface, port 80
+openfeed serve --addr :8080     # another port
+openfeed serve --addr 100.x.y.z:80   # only your Tailscale address
+```
+
+Open the printed address from your phone, over your home network or Tailscale. The page shows the
+newest posts, loads older ones as you scroll, and taps open the article in a new tab. Each visit
+refreshes in the background; when newer posts arrive, a "New posts ↑" button takes you to them, and
+pulling down to reload does the same.
+
+There is **no login**: anyone who can reach the address can read your river and refresh it. Bind
+`--addr` to your Tailscale address, or keep the port off untrusted networks. Some systems need
+privileges for ports below 1024; use `--addr :8080` there.
+
+The web page has no "You left off here" line. Opening it counts as reading up to the newest post it
+showed, so the TUI picks up above what you read on the phone. Running `openfeed serve` and the TUI at
+the same time is fine.
+
 ## Not yet
 
 openfeed is deliberately small so far. It does not have:
 
 - a reader pane: `o` opens the article in your browser;
 - removing or renaming subscriptions in the app, or OPML import: edit `config.toml`;
-- search, filtering by feed, the web UI, or AI features;
+- search, filtering by feed, or AI features;
+- tag filters or adding feeds on the web page: use the TUI;
 - pruning: cached posts are never deleted, so the database grows with your subscriptions. Removing a
   feed from the config hides its posts without deleting them;
 - log rotation: the log file grows too.

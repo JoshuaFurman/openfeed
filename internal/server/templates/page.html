@@ -1,0 +1,56 @@
+{{define "page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
+<title>openfeed</title>
+<link rel="icon" href="/assets/icon.svg?v={{.Assets}}" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/style.css?v={{.Assets}}">
+<script src="/assets/htmx.min.js?v={{.Assets}}" defer></script>
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/">openfeed</a>
+  <span class="spinner htmx-indicator" id="refreshing" role="status" aria-label="Refreshing"></span>
+</header>
+<div id="notice" class="notice" hx-post="/refresh{{with .Head}}?head={{token .}}{{end}}" hx-trigger="load" hx-swap="outerHTML" hx-indicator="#refreshing"></div>
+<main id="river">
+{{- if .ReadFail}}
+  <p class="empty">Couldn't read the river. Pull down to try again.</p>
+{{- else if .NoFeeds}}
+  <p class="empty">No subscriptions yet. Add feeds to <code>config.toml</code> or press <kbd>n</kbd> in the openfeed TUI.</p>
+{{- else if not .Posts}}
+  <p class="empty">No posts yet. They appear here once your feeds refresh.</p>
+{{- end}}
+{{template "posts" .}}
+</main>
+</body>
+</html>
+{{- end}}
+
+{{define "posts" -}}
+{{range .Posts}}
+<article class="post">
+  {{- if .URL}}<a class="hit" href="{{.URL}}" target="_blank" rel="noopener noreferrer" aria-label="{{or .Title "Untitled post"}}"></a>{{end}}
+  <p class="meta"><span class="feed">{{.Feed}}</span>{{range .Tags}} <span class="tag tag-{{.Color}}">{{.Name}}</span>{{end}} <span class="dot">·</span> <time datetime="{{.Date.Format "2006-01-02T15:04:05Z07:00"}}">{{.Age}}</time></p>
+  <h2 class="title">{{or .Title "(untitled)"}}</h2>
+  {{- with .Excerpt}}<p class="excerpt">{{.}}</p>{{end}}
+</article>
+{{- end}}
+{{- if .ReadFail}}{{with .Next}}
+<button class="more" hx-get="/older?before={{token .}}" hx-swap="outerHTML">Couldn't load older posts. Tap to retry.</button>
+{{- end}}{{else}}{{with .Next}}
+<div class="more" hx-get="/older?before={{token .}}" hx-trigger="intersect once" hx-swap="outerHTML"><span class="spinner"></span></div>
+{{- end}}{{end}}
+{{- end}}
+
+{{define "notice" -}}
+<div id="notice" class="notice">
+  {{- if .Newer}}<a class="pill" href="/">New posts ↑</a>{{end}}
+  {{- with .Failing}}<p class="failing">{{.}}</p>{{end}}
+</div>
+{{- end}}

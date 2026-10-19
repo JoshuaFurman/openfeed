@@ -11,7 +11,7 @@ Most RSS readers are filing cabinets — folders, unread counts, an inbox to cle
 Three faces, one core:
 
 - **TUI** (primary) — Bubble Tea. Launch `openfeed`, scroll, read, move on.
-- **Web** (later) — `openfeed serve` on localhost, for when a browser is genuinely easier to read in.
+- **Web** — `openfeed serve` on the local network or a tailnet, mobile first, for reading the river on a phone.
 - **AI** (later) — daily digest, surfacing personally interesting posts, article summary/explanation. Always optional; openfeed is fully usable with it turned off.
 
 Open source. Contributors should be able to read the code and understand it.
@@ -30,7 +30,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **River launch and direction** | Resume at the saved seen position: the cursor starts on the newest post at or below it, and newer posts are above. Reading moves upward; `g` jumps to the newest as an explicit skip. With no saved position, open at the newest post. There, cached posts are history from before the user joined the river, so the first navigation saves the head. | Keeps "You left off here" literally true and the reading position resumable across restarts. Upward reading makes seen advancement contiguous. Opening at the newest post (Twitter-style) was rejected: its divider marks skipped posts as passed. |
 | **Read state** | Seen-position in publication/fallback chronology, not unread counts or an arrival watermark. A divider marks that position; no bold/unbold, no badges. | No inbox-zero pressure. Late discoveries can fall below the divider; any discovery count must be separate from it. |
 | **Seen position** | One global point in timeline order: effective date plus an `ItemID` tie-breaker, stored as values without a foreign key. Absent until the user first reaches an item. | An item bookmark moves with date corrections, loses its anchor when its feed is removed or pruned, and regresses under last-writer-wins. A timestamp-only point hides same-instant posts from date-only feeds. |
-| **Seen advancement** | Only user navigation in the unfiltered river advances it, by keeping the maximum; it never moves backward. Viewport and selection are never persisted. | Loading or rendering is not reading. A maximum is idempotent and order-independent, so concurrent sessions need no revision or conflict error, unlike refreshes. |
+| **Seen advancement** | Only user navigation in the unfiltered river advances it, by keeping the maximum; it never moves backward. Viewport and selection are never persisted. The web river is the one exception: see Web seen position. | Loading or rendering is not reading. A maximum is idempotent and order-independent, so concurrent sessions need no revision or conflict error, unlike refreshes. |
 | **Storage** | SQLite via `modernc.org/sqlite` (pure Go, **no cgo**). `database/sql` directly, no ORM. Hand-written migrations as embedded `.sql`. | Buys FTS5 search, `ORDER BY score` for AI ranking, and safe concurrent access when `serve` runs alongside the TUI. Pure-Go driver keeps cross-compiled release binaries trivial. |
 | **Store boundary** | `FeedState` reads a subscription's cached validators and an opaque revision; `SaveRefresh` atomically persists a successful outcome against that snapshot, using store-owned inputs. The reader adapts fetched results; config retains subscription intent and labels. | Separate writes let callers advance validators without saving posts. No HTTP/parser types or caller-managed transactions belong in the store API. |
 | **Overlapping refreshes** | Only the first refresh committed against a given feed revision succeeds. Every accepted outcome advances the revision; a stale snapshot returns `ErrRefreshConflict` without changes. | Last-commit-wins lets a slow response overwrite newer content/validators. Revisions work across processes without holding a database lock during HTTP; fetch timestamps are not version tokens. |
@@ -63,7 +63,11 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Reader API** | `reader.Reader` is the seam interfaces use: blocking `Timeline` over all configured feeds, or one tag's, with config names and tags, `Tags`, `Refresh`, `Subscribe`, `SeenPosition`, `Reached`, and `SaveSeen`. A `Refresh` call during a round joins that round. The configured set grows only through `Subscribe` and is replaced rather than modified, so each read or round uses one snapshot. | Request/response keeps the module deep and serves the TUI and a future web server alike. An event-driven session would add lifecycle, event types, and fan-out. Its per-feed streaming is recoverable by rereading committed data while a refresh is pending. `SeenPosition` deliberately forwards to the store, so interfaces never depend on it. |
 | **Refresh policy** | Refresh at launch, while the cached river shows, and on pull: a double-tap of `k` or ↑ at the newest post. Each round fetches every due feed concurrently, at most 2 requests per host. A feed is not due within 30s of its last saved fetch, or during failure backoff: 15s doubling to 10 min, in memory, and reset on success. | Concurrency gives speed and full population. Per-host queues avoid rate-limit failures from sites hosting many feeds. A double-tap rather than a single press stops a stray tap, or scrolling up with a held key, from refreshing. The silent gap keeps pulls feeling responsive without refetching. Backoff stops a hanging feed from holding every refresh for its 30s timeout. |
 | **Article text** | Feed-provided content in the river. Full text extracted **on demand** when an item is opened, then cached. | Eager extraction means hundreds of requests to other people's servers per refresh. On-demand is polite and keeps refresh fast. |
-| **Web UI** | `html/template` + `//go:embed` + htmx. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Go 1.22+ pattern routing (`"GET /items/{id}"`) makes `gorilla/mux` unnecessary — **dropped from the original plan**. |
+| **Web UI** | `html/template` + `//go:embed` + vendored htmx (2.0.11) + one hand-written CSS file, mobile first. No hand-written JS, no CSS framework. Stdlib `net/http` routing. | Single self-contained binary, no Node, no build step. Server-rendered rows reuse the reader's paging instead of rebuilding river state in a client. Next.js/shadcn/Tailwind, a Vite SPA, Datastar, templ, and plain JS were compared (2026-10-18): each adds a build step, a client copy of state, or a less familiar model, for a single timeline. Go 1.22+ pattern routing makes `gorilla/mux` unnecessary. |
+| **Web exposure** | `openfeed serve` listens on `:80`, every interface, by default; `--addr` overrides it. No authentication. `http.CrossOriginProtection` guards every POST, a strict CSP allows only same-origin scripts and styles, and pages send no referrer. | The user reads on a phone over the LAN or Tailscale; reachability is the trust boundary. Cross-origin protection still stops a malicious site in the phone's browser from acting through it. Defaulting to localhost was rejected as unusable for the main case. |
+| **Web seen position** | The web shows no divider. Its page's launch refresh reaches the newest post that page showed, capped at the real head, as `g` does in the TUI. Scrolling older and anything else never reaches. | Reading twenty posts on the phone must not leave the TUI resuming before them. Reaching the shown head rather than the head after refresh keeps unseen posts above the divider. Tracking scrolled-past posts in the browser was rejected: it needs client JS and still guesses at reading. |
+| **Web refresh** | Each page load refreshes in the background and, when posts newer than the shown head exist, shows a "New posts ↑" pill that reloads the river at the head. Pulling down to reload the page refreshes too. No periodic refresh. | Twitter's pattern needs no scroll anchoring or client reconciliation: the page is rendered fresh. Inserting posts above the reader was rejected as needing JS to hold the scroll position on iOS. The 30s gap keeps repeated pulls cheap. |
+| **Excerpts** | Rows show up to 280 runes of plain text from the feed content, clamped to three lines by CSS, and omitted when it only repeats the title. HTML is tokenized with `golang.org/x/net/html` and discarded, never interpreted; script, style, and similar elements contribute nothing. Web only for now; the TUI may adopt it later. | Twitter-like rows need a glimpse of the post. A tokenizer cannot be tricked into executing markup, and its text output is escaped by `html/template`. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
 | **Paths** | XDG conventions **on all platforms, including macOS.** Hand-rolled in `internal/config`, ~40 lines, no dependency. | Primary dev machine is darwin, where `adrg/xdg` would resolve to `~/Library/Application Support`. We want `~/.config/openfeed` everywhere. |
 | **Versions and releases** | `openfeed --version` prints the module version Go stamps into the build info. A pushed `vX.Y.Z` tag runs GoReleaser: darwin/linux/windows × amd64/arm64 archives and a Homebrew cask in `JoshuaFurman/homebrew-tap`. | Go stamps the tag, a commit pseudo-version, or `+dirty` into every build, so `go install`, local, and release builds agree without `-X` ldflags or a package-level variable. The binaries are unsigned; the cask clears quarantine because signing and notarization need a paid Apple Developer account. |
@@ -275,6 +279,21 @@ is still read once. A failed filter read is retried by the next move, and refres
 subscribing reload the filtered span. Navigation, `g`, and `o` in a filtered view never reach. An empty
 filtered view says so and points to Esc.
 
+### Web river
+
+`internal/server` renders the river with `html/template` over `reader.Reader`, through its own
+consumer-side `River` interface. Routes: `GET /` renders the newest page; `GET /older?before=` renders
+one older page fragment, loaded by htmx when its sentinel scrolls into view; `POST /refresh?head=`
+reaches the shown head, runs a round, and returns the notice slot (the pill and failing feed names, never
+counts). Positions travel as `TimelineCursor` text tokens, an opaque URL encoding rather than a
+persistence format; malformed tokens are 400s. Rows show the feed name, its tags as `#tag` in one of
+twelve palette colors by position in `Reader.Tags`, the `EffectiveDate` age, the title or
+"(untitled)", and the excerpt. A row with an article URL is one tap target that opens it in a new tab
+with `noopener noreferrer`. `html/template` escapes every string, and CSS isolates feed text's
+bidirectional runs. Assets are embedded and cached immutably under a content-hash query. `Serve` shuts
+down within 5s of cancellation and then saves the seen position. Tag filtering and adding feeds on the
+web are later increments.
+
 ### Paths
 
 ```
@@ -420,9 +439,9 @@ internal/store/       SQLite; domain-shaped API; embedded migrations
 internal/reader/      orchestration — the core seam (see §3)
 internal/tui/         Bubble Tea
 internal/article/     on-demand readability extraction        [later]
-internal/server/      templates + htmx                        [later]
+internal/server/      web river: templates + htmx
 internal/ai/          Provider interface + no-op              [later]
-internal/cli/         cobra commands
+internal/cli/         cobra commands                          [later]
 ```
 
 > `article` may well collapse into `feed` — resist the urge to keep five shallow packages when two deep ones would do.
@@ -437,7 +456,9 @@ Added only when first genuinely needed. Each new dependency is a decision to jus
 | `charm.land/bubbletea/v2` · `lipgloss/v2` | in use | TUI event loop and display-width-aware styling. v2 is the current stable line (2.0.10 / 2.0.6). |
 | `charm.land/bubbles/v2` | in use | The refresh spinner and the add-feed popup's text inputs. `bubbles/list` is deliberately unused. `textinput` brings `atotto/clipboard` for Ctrl-V: pure Go, shelling out to the platform's clipboard tool. |
 | `github.com/charmbracelet/x/ansi` | in use | Display-cell width and ANSI-aware truncation for the river's columns. Already a Lip Gloss dependency, so using it directly adds nothing to the build. |
-| `cobra` | planned | CLI subcommands, from the first one. Until then, stdlib `flag` parses the lone `--version`, and positional arguments are rejected rather than ignored. |
+| `cobra` | planned | CLI subcommands, once the CLI grows past `serve`. Until then, stdlib `flag` parses `--version` and `serve [--addr]`, and unexpected arguments are rejected rather than ignored. |
+| `golang.org/x/net/html` | in use | Tokenizes untrusted feed HTML into excerpt text. Already a gofeed dependency, so using it directly adds nothing to the build. |
+| htmx 2.0.11 | vendored | `internal/server/assets/htmx.min.js`, 0BSD, checked identical from unpkg and jsDelivr. Loads older pages and the refresh notice without hand-written JS. |
 | `mmcdole/gofeed` | in use | RSS/Atom/JSON Feed parsing behind our source-item model; avoids maintaining three format parsers. HTTP remains ours for conditional GET and response limits. |
 | `modernc.org/sqlite` | in use | pure-Go, no cgo (see §2) |
 | `go-shiori/go-readability` | later | article extraction |
