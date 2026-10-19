@@ -6,25 +6,21 @@ work status and sequencing. Proposals here are not settled decisions until recor
 
 ## Session handoff
 
-- **Completed:** v0.1's read-only river, released as `v0.1.0`. Adding feeds in the TUI (`b919f54`),
-  filtering by tag (`b673c69`), and the tag column (`e5907be`) are committed.
-- **Current behavior:** `openfeed` resumes the TUI river below a "You left off here" divider, refreshes
-  at launch and on a double-tap of `k`/↑, adds feeds with `n`, and filters by tag with `/`.
-  `openfeed serve` (uncommitted) serves the same river as a mobile-first web page.
-- **Implementation in progress: the web river** (see [below](#v03--web-river)). Implemented and
-  verified, not yet reviewed or committed.
-- **Last verification (web river):**
-  - formatting, `go vet`, `staticcheck`, and uncached full race and no-cgo tests;
-  - the real binary with empty XDG directories and three local feeds (one 404ing, one with 120 posts):
-    headless Chrome emulating a 390×844 phone ran htmx under the CSP with no console errors, showed
-    "dead is failing to refresh", and loaded 124 of 124 posts once each by scrolling, with no
-    horizontal overflow. After a newer post was added and its gap passed, the old page's refresh
-    returned "New posts ↑" and the reload showed it on top. Default `:80` bound unprivileged on macOS
-    and answered on the LAN address; SIGTERM exited 143 quietly; an invalid port printed a clean error.
-    Screenshots were not inspected (image reading is disabled in this session).
-- **Next action:** the user opens it on a phone and reviews the change. Suggested commits:
-  `feat(store): encode timeline positions as text` and `feat(server): serve the river on the web`.
-  Then: tag filters on the web.
+- **Completed:** v0.1's read-only river (`v0.1.0`); adding feeds, tag filters, and the tag column in the
+  TUI; the first web river (`31af99a`).
+- **Current behavior:** `openfeed serve` serves a mobile-first web river: rounded cards with tag chips
+  and the article's site, endless scroll, a "New posts ↑" pill, a header bell whose popover lists
+  failing feeds with their errors, and a light/dark toggle remembered in a cookie (uncommitted).
+- **Implementation in progress: web polish** (see [below](#v03--web-river)). Implemented and verified,
+  not yet reviewed or committed.
+- **Last verification (web polish):** formatting, `go vet`, `staticcheck`, uncached full race and
+  no-cgo tests. Headless Chrome at 390×844 with local feeds, one failing: screenshots inspected in
+  light and dark; the bell showed its dot, opened a popover naming the feed and its 404, and closed on
+  an outside tap. The toggle restyled in place, survived a reload, overrode a dark device in light mode,
+  and with no cookie the page followed the device. No console errors and no horizontal overflow.
+- **Next action:** the user checks it on the phone (needs iOS 17+ for the popover) and reviews.
+  Suggested commit: `feat(web): card redesign, theme toggle, and a failing-feeds bell`. Then tag
+  filters on the web.
 
 ### Keeping this useful
 
@@ -416,6 +412,8 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
   final seen save.
 - [x] `openfeed serve [--addr]`, logging to the same file as the TUI.
 - [x] README, `AGENTS.md`, and a real-browser check at phone size.
+- [x] Card redesign (user choice B, 2026-10-19), a light/dark toggle kept in a cookie, and failing
+  feeds in a header bell's popover instead of a sticky notice that covered the first card.
 - [ ] Tag filters on the web: tag chips or a picker, `?tag=` on every route, filtered views never reach.
 - [ ] Adding feeds on the web: a form over `Reader.Subscribe`.
 - [ ] Excerpts in the TUI.
@@ -429,7 +427,10 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
 - `internal/server/server_test.go`: rows with names, colored tags, excerpts, links, and dates; a post
   without a URL has no link; an excerpt repeating the title is dropped; feed text and config labels
   are escaped. Older pages reach every post once, as fragments. Bad tokens are 400s. The pill appears
-  only when a newer post exists; failing feeds are named. Rendering never reaches; the refresh reaches
+  only when a newer post exists; the bell waits, then shows all refreshed or a dot and each failing
+  feed with its reason, out of band. The theme cookie renders either theme, follows the device without
+  one, ignores unknown values, rejects bad and cross-site posts, and redirects plain form posts; hosts
+  drop `www.`. Rendering never reaches; the refresh reaches
   the shown head, and a forged head is capped at the real one. Empty states, cross-origin POSTs
   rejected without fetching, security headers, immutable assets, templates not served, and `Serve`
   stopping on cancellation and saving the position.

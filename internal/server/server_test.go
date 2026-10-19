@@ -89,6 +89,20 @@ func (f *fixture) do(t *testing.T, method, target string, header http.Header) *h
 	return rec
 }
 
+func (f *fixture) post(t *testing.T, target, form string, header http.Header, hx string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, target, strings.NewReader(form))
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	if hx != "" {
+		req.Header.Set("HX-Request", hx)
+	}
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	return rec
+}
+
 func (f *fixture) get(t *testing.T, target string) string {
 	t.Helper()
 	rec := f.do(t, http.MethodGet, target, nil)
@@ -157,7 +171,8 @@ func TestPageShowsTheRiver(t *testing.T) {
 		t.Errorf("titles = %v, want %v", got, want)
 	}
 	for _, want := range []string{
-		`<span class="feed">Alpha</span> <span class="tag tag-0">tech</span> <span class="tag tag-1">go</span>`,
+		`<span class="feed">Alpha</span><time`,
+		`<span class="tags"><span class="tag tag-0">tech</span><span class="tag tag-1">go</span></span><span class="host">example.com ↗</span>`,
 		`<p class="excerpt">About a-new</p>`,
 		`href="https://example.com/a-new" target="_blank" rel="noopener noreferrer"`,
 		`<time datetime="` + base.Add(3*time.Hour).Format(time.RFC3339) + `">`,
@@ -262,16 +277,87 @@ func TestRefreshOffersNewerPosts(t *testing.T) {
 	}
 }
 
-func TestRefreshNamesFailingFeeds(t *testing.T) {
+func TestBellListsFailingFeeds(t *testing.T) {
 	f := newFixture(t, defaultFeeds(), map[string][]feed.Item{})
-	f.feeds.failing[beta] = true
-	if notice := f.refresh(t, "/refresh"); !strings.Contains(notice, "Beta is failing to refresh") {
-		t.Errorf("notice = %s", notice)
+	page := f.get(t, "/")
+	if !strings.Contains(page, "Checking your feeds…") || strings.Contains(page, `class="badge"`) {
+		t.Errorf("before the refresh, the bell is not waiting: %s", page)
 	}
+	if notice := f.refresh(t, "/refresh"); !strings.Contains(notice, "All feeds refreshed.") || strings.Contains(notice, `class="badge"`) {
+		t.Errorf("all feeds refreshed, but the bell says %s", notice)
+	}
+
 	f = newFixture(t, defaultFeeds(), map[string][]feed.Item{})
 	f.feeds.failing[alpha], f.feeds.failing[beta] = true, true
-	if notice := f.refresh(t, "/refresh"); !strings.Contains(notice, "2 feeds failing: Alpha, Beta") {
-		t.Errorf("notice = %s", notice)
+	notice := f.refresh(t, "/refresh")
+	for _, want := range []string{
+		`<div hx-swap-oob="innerHTML:#bell">`,
+		`<span class="badge"></span>`,
+		`<li><strong>Alpha</strong><span>connection refused</span></li><li><strong>Beta</strong><span>connection refused</span></li>`,
+	} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("notice lacks %q:\n%s", want, notice)
+		}
+	}
+	if strings.Contains(notice, `class="pill"`) {
+		t.Error("failures show the new-posts pill")
+	}
+}
+
+func TestThemeCookie(t *testing.T) {
+	f := newFixture(t, defaultFeeds(), nil)
+	same := http.Header{"Sec-Fetch-Site": {"same-origin"}, "Content-Type": {"application/x-www-form-urlencoded"}}
+	if page := f.get(t, "/"); !strings.Contains(page, `content="light dark"`) || !strings.Contains(page, `data-theme=""`) {
+		t.Error("without a cookie, the page does not follow the device")
+	}
+	for _, theme := range []string{"dark", "light"} {
+		rec := f.post(t, "/theme", "theme="+theme, same, "true")
+		cookie := rec.Result().Cookies()
+		if rec.Code != http.StatusOK || len(cookie) != 1 || cookie[0].Value != theme || !cookie[0].HttpOnly || cookie[0].MaxAge <= 0 {
+			t.Fatalf("POST /theme %s = %d, %v", theme, rec.Code, cookie)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, `id="theme" class="theme" data-theme="`+theme+`"`) || strings.Contains(body, "<html") {
+			t.Errorf("htmx theme answer = %s", body)
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+		req.AddCookie(cookie[0])
+		page := httptest.NewRecorder()
+		f.handler.ServeHTTP(page, req)
+		if body := page.Body.String(); !strings.Contains(body, `content="`+theme+`"`) || !strings.Contains(body, `data-theme="`+theme+`"`) {
+			t.Errorf("a %s cookie does not render the %s theme", theme, theme)
+		}
+	}
+	if rec := f.post(t, "/theme", "theme=dark", same, ""); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Errorf("a plain form post = %d to %q", rec.Code, rec.Header().Get("Location"))
+	}
+	for _, bad := range []string{"", "theme=", "theme=blue", "theme=dark%22"} {
+		if rec := f.post(t, "/theme", bad, same, "true"); rec.Code != http.StatusBadRequest || len(rec.Result().Cookies()) != 0 {
+			t.Errorf("POST /theme %q = %d", bad, rec.Code)
+		}
+	}
+	if rec := f.post(t, "/theme", "theme=dark", http.Header{"Sec-Fetch-Site": {"cross-site"}}, "true"); rec.Code != http.StatusForbidden {
+		t.Errorf("cross-site theme change = %d", rec.Code)
+	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "theme", Value: "<script>"})
+	page := httptest.NewRecorder()
+	f.handler.ServeHTTP(page, req)
+	if !strings.Contains(page.Body.String(), `data-theme=""`) {
+		t.Error("an unknown cookie value is not ignored")
+	}
+}
+
+func TestHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://www.NYTimes.com/2026/a.html": "nytimes.com",
+		"https://go.dev/blog":                 "go.dev",
+		"http://[::1]:8080/x":                 "::1",
+		"":                                    "",
+		"%":                                   "",
+	} {
+		if got := host(in); got != want {
+			t.Errorf("host(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

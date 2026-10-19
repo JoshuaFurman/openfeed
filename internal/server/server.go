@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -86,6 +87,7 @@ func New(river River, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /{$}", h.home)
 	mux.HandleFunc("GET /older", h.older)
 	mux.HandleFunc("POST /refresh", h.refresh)
+	mux.HandleFunc("POST /theme", h.theme)
 	mux.Handle("GET /favicon.ico", http.RedirectHandler("/assets/icon.svg?v="+h.assets, http.StatusMovedPermanently))
 	static, _ := fs.Sub(files, "assets")
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", immutable(http.FileServerFS(static))))
@@ -101,9 +103,15 @@ type handler struct {
 // post is one river row, holding only what the page shows.
 type post struct {
 	Title, URL, Excerpt, Feed string
+	Host                      string // The article's site, without "www.", or empty with URL.
 	Tags                      []tag
 	Date                      time.Time
 	Age                       string
+}
+
+// alert is one failing feed in the bell's list.
+type alert struct {
+	Feed, Reason string
 }
 
 type tag struct {
@@ -113,18 +121,20 @@ type tag struct {
 
 // view is everything a template renders.
 type view struct {
-	Assets   string
-	Posts    []post
-	Next     *reader.Position // Older continuation; nil means no older posts for now.
-	Head     *reader.Position // The newest post shown, which a refresh checks for newer posts above.
-	NoFeeds  bool
-	Failing  string
-	Newer    bool
-	ReadFail bool
+	Assets    string
+	Theme     string // "light", "dark", or empty to follow the device.
+	Posts     []post
+	Next      *reader.Position // Older continuation; nil means no older posts for now.
+	Head      *reader.Position // The newest post shown, which a refresh checks for newer posts above.
+	NoFeeds   bool
+	Alerts    []alert
+	Refreshed bool // The bell's list reflects a finished refresh.
+	Newer     bool
+	ReadFail  bool
 }
 
 func (h *handler) home(w http.ResponseWriter, r *http.Request) {
-	v := view{Assets: h.assets, NoFeeds: len(h.river.Feeds()) == 0}
+	v := view{Assets: h.assets, Theme: theme(r), NoFeeds: len(h.river.Feeds()) == 0}
 	page, err := h.river.Timeline(r.Context(), reader.Query{Limit: pageSize})
 	if err != nil {
 		h.log.Warn("web: read river", "error", err)
@@ -153,7 +163,7 @@ func (h *handler) older(w http.ResponseWriter, r *http.Request) {
 }
 
 // refresh reaches the newest post the page showed, runs a refresh round, and answers with the notice
-// slot: a pill when posts newer than that head exist, and any failing feeds.
+// slot: a pill when posts newer than that head exist, with the bell's failing feeds out of band.
 func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 	var shown *reader.Position
 	if text := r.URL.Query().Get("head"); text != "" {
@@ -168,7 +178,7 @@ func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // The client went away.
 	}
-	v := view{Failing: failing(report)}
+	v := view{Alerts: alerts(report), Refreshed: true}
 	if page, err := h.river.Timeline(r.Context(), reader.Query{After: shown, Limit: 1}); err == nil {
 		v.Newer = len(page.Items) > 0 && shown != nil
 	} else {
@@ -191,21 +201,44 @@ func (h *handler) reach(ctx context.Context, shown reader.Position) {
 	_ = h.river.SaveSeen(ctx) // The reader logs failures; reading goes on.
 }
 
-// failing names the feeds whose latest refresh failed, or is empty when none did.
-func failing(report reader.Report) string {
-	var names []string
+// alerts lists the feeds whose latest refresh failed, with why, in config order.
+func alerts(report reader.Report) []alert {
+	var list []alert
 	for _, result := range report.Feeds {
 		if result.Status == reader.Failing {
-			names = append(names, result.Feed.Name)
+			list = append(list, alert{Feed: result.Feed.Name, Reason: result.Err.Error()})
 		}
 	}
-	switch len(names) {
-	case 0:
-		return ""
-	case 1:
-		return names[0] + " is failing to refresh"
+	return list
+}
+
+const themeCookie = "theme"
+
+// theme is the request's chosen theme, or empty to follow the device.
+func theme(r *http.Request) string {
+	if c, err := r.Cookie(themeCookie); err == nil && (c.Value == "light" || c.Value == "dark") {
+		return c.Value
 	}
-	return fmt.Sprintf("%d feeds failing: %s", len(names), strings.Join(names, ", "))
+	return ""
+}
+
+// theme remembers the chosen theme in a cookie. htmx requests get the page's theme marker out of
+// band, so the page restyles in place; plain form posts are sent back to the river.
+func (h *handler) theme(w http.ResponseWriter, r *http.Request) {
+	chosen := r.PostFormValue("theme")
+	if chosen != "light" && chosen != "dark" {
+		http.Error(w, "unknown theme", http.StatusBadRequest)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: themeCookie, Value: chosen, Path: "/", MaxAge: 400 * 24 * 60 * 60, // Browsers cap cookies at 400 days.
+		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	if r.Header.Get("HX-Request") != "true" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	h.render(w, "theme", view{Theme: chosen})
 }
 
 func (h *handler) fill(v *view, page reader.Page) {
@@ -215,7 +248,7 @@ func (h *handler) fill(v *view, page reader.Page) {
 	}
 	now := time.Now()
 	for _, item := range page.Items {
-		p := post{Title: item.Title, URL: item.URL, Excerpt: excerpt(item.Content), Feed: item.FeedName, Date: item.EffectiveDate()}
+		p := post{Title: item.Title, URL: item.URL, Host: host(item.URL), Excerpt: excerpt(item.Content), Feed: item.FeedName, Date: item.EffectiveDate()}
 		if p.Excerpt == strings.TrimSpace(p.Title) {
 			p.Excerpt = "" // Title-only feeds repeat the title as content.
 		}
@@ -237,6 +270,15 @@ func (h *handler) render(w http.ResponseWriter, name string, v view) {
 	if err := templates.ExecuteTemplate(w, name, v); err != nil {
 		h.log.Warn("web: render", "template", name, "error", err)
 	}
+}
+
+// host is an article URL's site for display, without "www.".
+func host(articleURL string) string {
+	u, err := url.Parse(articleURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 }
 
 // token encodes a position for a URL; templates only receive positions from the reader.

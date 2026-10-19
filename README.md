@@ -124,7 +124,9 @@ openfeed serve --addr 100.x.y.z:80   # only your Tailscale address
 Open the printed address from your phone, over your home network or Tailscale. The page shows the
 newest posts, loads older ones as you scroll, and taps open the article in a new tab. Each visit
 refreshes in the background; when newer posts arrive, a "New posts ↑" button takes you to them, and
-pulling down to reload does the same.
+pulling down to reload does the same. A red dot on the bell means a feed is failing to refresh; tap it
+to see which and why. The sun/moon button switches between light and dark, and each browser remembers
+its choice; until you pick one, the page follows your device.
 
 There is **no login**: anyone who can reach the address can read your river and refresh it. Bind
 `--addr` to your Tailscale address, or keep the port off untrusted networks. Some systems need
