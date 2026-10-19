@@ -7,26 +7,43 @@
 <meta name="color-scheme" content="{{or .Theme "light dark"}}">
 <meta name="referrer" content="no-referrer">
 <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
-<title>openfeed</title>
+<title>{{with .Tag.Name}}#{{.}} · {{end}}openfeed</title>
 <link rel="icon" href="/assets/icon.svg?v={{.Assets}}" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/style.css?v={{.Assets}}">
 <script src="/assets/htmx.min.js?v={{.Assets}}" defer></script>
 </head>
 <body>
 <header class="bar">
-  <a class="brand" href="/">openfeed</a>
+  <div class="title-bar">
+    <a class="brand" href="/">openfeed</a>
+    {{- with .Tag.Name}}<a class="active tag-{{$.Tag.Color}}" href="/" aria-label="Show all posts, not only #{{.}}"><span>{{.}}</span><b aria-hidden="true">×</b></a>{{end}}
+  </div>
   <div class="tools">
     <span class="spinner htmx-indicator" id="refreshing" role="status" aria-label="Refreshing"></span>
+    {{- if .Tags}}
+    <button class="icon filter{{if .Tag.Name}} on{{end}}" type="button" popovertarget="picker" aria-label="Filter by tag">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4"/></svg>
+    </button>
+    <nav id="picker" class="menu picker" popover aria-label="Filter by tag">
+      <h2>Filter by tag</h2>
+      <a href="/"{{if not .Tag.Name}} aria-current="page"{{end}}>All posts</a>
+      {{- range .Tags}}
+      <a href="{{link "/" "tag" .Name}}"{{if eq .Name $.Tag.Name}} aria-current="page"{{end}}><span class="tag-{{.Color}}">#{{.Name}}</span></a>
+      {{- end}}
+    </nav>
+    {{- end}}
     <div id="bell" class="bell">{{template "bell" .}}</div>
     {{template "theme" .}}
   </div>
 </header>
-<div id="notice" class="notice" hx-post="/refresh{{with .Head}}?head={{token .}}{{end}}" hx-trigger="load" hx-swap="outerHTML" hx-indicator="#refreshing"></div>
+<div id="notice" class="notice" hx-post="{{link "/refresh" "tag" .Tag.Name "head" .Head}}" hx-trigger="load" hx-swap="outerHTML" hx-indicator="#refreshing"></div>
 <main id="river">
 {{- if .ReadFail}}
   <p class="empty">Couldn't read the river. Pull down to try again.</p>
 {{- else if .NoFeeds}}
   <p class="empty">No subscriptions yet. Add feeds to <code>config.toml</code> or press <kbd>n</kbd> in the openfeed TUI.</p>
+{{- else if and (not .Posts) .Tag.Name}}
+  <p class="empty">No posts tagged #{{.Tag.Name}} yet. <a href="/">Show all posts</a></p>
 {{- else if not .Posts}}
   <p class="empty">No posts yet. They appear here once your feeds refresh.</p>
 {{- end}}
@@ -49,15 +66,15 @@
 </article>
 {{- end}}
 {{- if .ReadFail}}{{with .Next}}
-<button class="more" hx-get="/older?before={{token .}}" hx-swap="outerHTML">Couldn't load older posts. Tap to retry.</button>
+<button class="more" hx-get="{{link "/older" "tag" $.Tag.Name "before" .}}" hx-swap="outerHTML">Couldn't load older posts. Tap to retry.</button>
 {{- end}}{{else}}{{with .Next}}
-<div class="more" hx-get="/older?before={{token .}}" hx-trigger="intersect once" hx-swap="outerHTML"><span class="spinner"></span></div>
+<div class="more" hx-get="{{link "/older" "tag" $.Tag.Name "before" .}}" hx-trigger="intersect once" hx-swap="outerHTML"><span class="spinner"></span></div>
 {{- end}}{{end}}
 {{- end}}
 
 {{define "notice" -}}
 <div id="notice" class="notice">
-  {{- if .Newer}}<a class="pill" href="/">New posts ↑</a>{{end}}
+  {{- if .Newer}}<a class="pill" href="{{link "/" "tag" .Tag.Name}}">New posts ↑</a>{{end}}
 </div>
 <div hx-swap-oob="innerHTML:#bell">{{template "bell" .}}</div>
 {{- end}}
@@ -67,7 +84,7 @@
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
   {{- if .Alerts}}<span class="badge"></span>{{end}}
 </button>
-<div id="alerts" class="alerts" popover>
+<div id="alerts" class="menu alerts" popover>
 {{- if .Alerts}}
   <h2>Failing to refresh</h2>
   <ul>{{range .Alerts}}<li><strong>{{.Feed}}</strong><span>{{.Reason}}</span></li>{{end}}</ul>

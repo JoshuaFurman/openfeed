@@ -70,6 +70,7 @@ These are settled. Revisit only with a reason, and update this file when you do.
 | **Web theme** | The page follows the device's light/dark setting until the header toggle picks one, remembered per browser in an `HttpOnly` cookie and rendered by the server. The toggle is a form that htmx posts, restyling in place; without JS it redirects. CSS `light-dark()` holds one palette. | Server rendering avoids a flash of the wrong theme. A script reading `localStorage` would run only after load under the strict CSP, flashing white in dark mode, or need an inline script the CSP forbids. |
 | **Web cards** | Rounded cards with gaps: feed name in small caps with the age on the right, the title, the excerpt, then tag chips and the article's site (`nytimes.com ↗`). | Chosen by the user from three mockups (2026-10-19) over a Twitter avatar row and a headline-first list. The site says where a tap goes before tapping. |
 | **Web failures** | The bell's `popover` replaced a sticky notice, which covered the first card's title. `<details>` is the fallback if popover proves unreliable. | Popover needs iOS 17+, but it dismisses on an outside tap with no JS. |
+| **Web tag filters** | A filter icon beside the bell opens a `popover` listing "All posts" and `Reader.Tags`, the current choice checked. Choosing one loads `/?tag=`, and every route carries the tag, matched ignoring case and spelled as `Reader.Tags` lists it. The header shows a `#tag ×` pill that returns to the whole river, and the icon turns the accent color. A tag no feed carries redirects the page to the whole river and is a 400 elsewhere. Filtered views never reach. The icon is absent when no feed has tags. | Chosen by the user from mockups (2026-10-19) over a sticky chip strip: the header keeps its height when not filtering, at the cost of two taps to switch. Links rather than a client-side filter keep the view bookmarkable and the back button working. Not reaching follows the TUI's rule: the filter hid posts below the head. |
 | **Excerpts** | Rows show up to 280 runes of plain text from the feed content, clamped to three lines by CSS, and omitted when it only repeats the title. HTML is tokenized with `golang.org/x/net/html` and discarded, never interpreted; script, style, and similar elements contribute nothing. Web only for now; the TUI may adopt it later. | Twitter-like rows need a glimpse of the post. A tokenizer cannot be tricked into executing markup, and its text output is escaped by `html/template`. |
 | **AI** | Define the `Provider` seam now with a no-op implementation. Build zero real providers until reading is solid. | Core never branches on "is AI on?" — it just holds a Provider. No speculative generality. |
 | **Paths** | XDG conventions **on all platforms, including macOS.** Hand-rolled in `internal/config`, ~40 lines, no dependency. | Primary dev machine is darwin, where `adrg/xdg` would resolve to `~/Library/Application Support`. We want `~/.config/openfeed` everywhere. |
@@ -289,14 +290,15 @@ consumer-side `River` interface. Routes: `GET /` renders the newest page; `GET /
 one older page fragment, loaded by htmx when its sentinel scrolls into view; `POST /refresh?head=`
 reaches the shown head, runs a round, and returns the notice slot (the pill and failing feed names, never
 counts). Positions travel as `TimelineCursor` text tokens, an opaque URL encoding rather than a
-persistence format; malformed tokens are 400s. The refresh's bell update arrives out of band
+persistence format; malformed tokens are 400s. Each route takes an optional `tag`, and a `link` template
+function builds the URLs, so pages, older fragments, the refresh, and the pill keep the filter. The refresh's bell update arrives out of band
 (`hx-swap-oob`) beside the pill. `POST /theme` sets the theme cookie. Cards show the feed name, the
 `EffectiveDate` age, the title or "(untitled)", the excerpt, its tags as `#tag` chips in one of twelve
 palette colors by position in `Reader.Tags`, and the article's host without `www.`. A row with an article URL is one tap target that opens it in a new tab
 with `noopener noreferrer`. `html/template` escapes every string, and CSS isolates feed text's
 bidirectional runs. Assets are embedded and cached immutably under a content-hash query. `Serve` shuts
-down within 5s of cancellation and then saves the seen position. Tag filtering and adding feeds on the
-web are later increments.
+down within 5s of cancellation and then saves the seen position. Adding feeds on the web is a later
+increment.
 
 ### Paths
 

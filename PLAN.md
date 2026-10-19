@@ -7,20 +7,19 @@ work status and sequencing. Proposals here are not settled decisions until recor
 ## Session handoff
 
 - **Completed:** v0.1's read-only river (`v0.1.0`); adding feeds, tag filters, and the tag column in the
-  TUI; the first web river (`31af99a`).
-- **Current behavior:** `openfeed serve` serves a mobile-first web river: rounded cards with tag chips
-  and the article's site, endless scroll, a "New posts ↑" pill, a header bell whose popover lists
-  failing feeds with their errors, and a light/dark toggle remembered in a cookie (uncommitted).
-- **Implementation in progress: web polish** (see [below](#v03--web-river)). Implemented and verified,
-  not yet reviewed or committed.
-- **Last verification (web polish):** formatting, `go vet`, `staticcheck`, uncached full race and
-  no-cgo tests. Headless Chrome at 390×844 with local feeds, one failing: screenshots inspected in
-  light and dark; the bell showed its dot, opened a popover naming the feed and its 404, and closed on
-  an outside tap. The toggle restyled in place, survived a reload, overrode a dark device in light mode,
-  and with no cookie the page followed the device. No console errors and no horizontal overflow.
-- **Next action:** the user checks it on the phone (needs iOS 17+ for the popover) and reviews.
-  Suggested commit: `feat(web): card redesign, theme toggle, and a failing-feeds bell`. Then tag
-  filters on the web.
+  TUI; the web river (`31af99a`) and its cards, theme toggle, and failing-feeds bell (`d305f43`).
+- **Current behavior:** `openfeed serve` serves a mobile-first web river with a tag filter: a filter
+  icon opens a picker, and the header shows `#tag ×` while filtered (uncommitted).
+- **Implementation in progress: web tag filters** (see [below](#v03--web-river)). Implemented and
+  verified, not yet reviewed or committed.
+- **Last verification (web tag filters):** formatting, `go vet`, `staticcheck`, uncached full race and
+  no-cgo tests. Headless Chrome at 390×844, screenshots inspected: the picker opened with All posts
+  checked and four tags in their colors; tapping `#news` loaded `/?tag=news` titled "#news · openfeed",
+  showed only lobsters posts, and scrolling loaded all 120 of them; a 40-character tag truncated in
+  the header pill and on cards without horizontal overflow; tapping the pill returned to `/`. No
+  console errors.
+- **Next action:** the user reviews on the phone. Suggested commit: `feat(web): filter the river by tag`.
+  Then adding feeds on the web, or excerpts in the TUI.
 
 ### Keeping this useful
 
@@ -414,7 +413,9 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
 - [x] README, `AGENTS.md`, and a real-browser check at phone size.
 - [x] Card redesign (user choice B, 2026-10-19), a light/dark toggle kept in a cookie, and failing
   feeds in a header bell's popover instead of a sticky notice that covered the first card.
-- [ ] Tag filters on the web: tag chips or a picker, `?tag=` on every route, filtered views never reach.
+- [x] Tag filters on the web (user choice B, 2026-10-19): a filter icon and popover picker, `?tag=` on
+  every route, a `#tag ×` header pill, and filtered views never reaching. Long tags on cards truncate.
+- [ ] Tappable tag chips on cards, if wanted (offered, not chosen).
 - [ ] Adding feeds on the web: a form over `Reader.Subscribe`.
 - [ ] Excerpts in the TUI.
 
@@ -430,7 +431,10 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
   only when a newer post exists; the bell waits, then shows all refreshed or a dot and each failing
   feed with its reason, out of band. The theme cookie renders either theme, follows the device without
   one, ignores unknown values, rejects bad and cross-site posts, and redirects plain form posts; hosts
-  drop `www.`. Rendering never reaches; the refresh reaches
+  drop `www.`. Tag filters narrow every page and older page, case-insensitively, with the picker,
+  title, pill, and `#tag ×` reflecting the filter; unknown tags redirect or are 400s; filtered refreshes
+  never reach, and their pill appears only for posts in the filter and keeps it. `link` builds encoded
+  URLs, skipping empty values. Rendering never reaches; the refresh reaches
   the shown head, and a forged head is capped at the real one. Empty states, cross-origin POSTs
   rejected without fetching, security headers, immutable assets, templates not served, and `Serve`
   stopping on cancellation and saving the position.

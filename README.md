@@ -126,7 +126,9 @@ newest posts, loads older ones as you scroll, and taps open the article in a new
 refreshes in the background; when newer posts arrive, a "New posts ↑" button takes you to them, and
 pulling down to reload does the same. A red dot on the bell means a feed is failing to refresh; tap it
 to see which and why. The sun/moon button switches between light and dark, and each browser remembers
-its choice; until you pick one, the page follows your device.
+its choice; until you pick one, the page follows your device. The filter icon next to the bell shows
+only one tag's feeds; the header then shows `#tag ×`, and tapping it returns to all posts. As in the
+TUI, reading a filtered view never moves "You left off here".
 
 There is **no login**: anyone who can reach the address can read your river and refresh it. Bind
 `--addr` to your Tailscale address, or keep the port off untrusted networks. Some systems need
@@ -143,7 +145,7 @@ openfeed is deliberately small so far. It does not have:
 - a reader pane: `o` opens the article in your browser;
 - removing or renaming subscriptions in the app, or OPML import: edit `config.toml`;
 - search, filtering by feed, or AI features;
-- tag filters or adding feeds on the web page: use the TUI;
+- adding feeds on the web page: use the TUI;
 - pruning: cached posts are never deleted, so the database grows with your subscriptions. Removing a
   feed from the config hides its posts without deleting them;
 - log rotation: the log file grows too.

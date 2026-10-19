@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -124,7 +125,7 @@ func (f *fixture) refresh(t *testing.T, target string) string {
 
 var (
 	titlePattern = regexp.MustCompile(`<h2 class="title">([^<]*)</h2>`)
-	olderPattern = regexp.MustCompile(`hx-get="(/older\?before=[^"]+)"`)
+	olderPattern = regexp.MustCompile(`hx-get="(/older\?[^"]+)"`)
 	headPattern  = regexp.MustCompile(`hx-post="(/refresh[^"]*)"`)
 )
 
@@ -141,7 +142,7 @@ func older(body string) string {
 	if m == nil {
 		return ""
 	}
-	return strings.ReplaceAll(m[1], "&#43;", "+")
+	return html.UnescapeString(m[1])
 }
 
 func refreshTarget(t *testing.T, body string) string {
@@ -150,7 +151,7 @@ func refreshTarget(t *testing.T, body string) string {
 	if m == nil {
 		t.Fatalf("page has no launch refresh:\n%s", body)
 	}
-	return strings.ReplaceAll(m[1], "&#43;", "+")
+	return html.UnescapeString(m[1])
 }
 
 func populate(t *testing.T, f *fixture) {
@@ -483,6 +484,201 @@ func TestAge(t *testing.T) {
 	} {
 		if got := age(tc.date, now); got != tc.want {
 			t.Errorf("age(%v) = %q, want %q", tc.date, got, tc.want)
+		}
+	}
+}
+
+// tagged serves three feeds: alpha tagged tech and go, beta tagged news, and an untagged gamma.
+func tagged(t *testing.T) *fixture {
+	t.Helper()
+	const gamma = "https://gamma.example/feed"
+	var a, b, c []feed.Item
+	for i := range 60 {
+		a = append(a, entry(fmt.Sprintf("a%d", i), 3*i))
+		b = append(b, entry(fmt.Sprintf("b%d", i), 3*i+1))
+		c = append(c, entry(fmt.Sprintf("c%d", i), 3*i+2))
+	}
+	f := newFixture(t, []config.Feed{
+		{URL: alpha, Name: "Alpha", Tags: []string{"tech", "go"}},
+		{URL: beta, Name: "Beta", Tags: []string{"News & Notes"}},
+		{URL: gamma, Name: "Gamma"},
+	}, map[string][]feed.Item{alpha: a, beta: b, gamma: c})
+	populate(t, f)
+	return f
+}
+
+// collect pages from target through every older page, returning the titles in order.
+func collect(t *testing.T, f *fixture, target string) []string {
+	t.Helper()
+	body := f.get(t, target)
+	got := titles(body)
+	for next := older(body); next != ""; next = older(body) {
+		body = f.get(t, next)
+		got = append(got, titles(body)...)
+	}
+	return got
+}
+
+func TestTagFilterNarrowsEveryPage(t *testing.T) {
+	f := tagged(t)
+	for _, tc := range []struct {
+		target, prefix string
+	}{
+		{"/?tag=tech", "a"},
+		{"/?tag=GO", "a"},
+		{"/?tag=" + url.QueryEscape(" news & notes "), "b"},
+	} {
+		got := collect(t, f, tc.target)
+		if len(got) != 60 {
+			t.Errorf("%s paged through %d posts, want 60", tc.target, len(got))
+		}
+		for _, title := range got {
+			if !strings.HasPrefix(title, tc.prefix) {
+				t.Errorf("%s shows %q", tc.target, title)
+				break
+			}
+		}
+	}
+	if got := collect(t, f, "/"); len(got) != 180 {
+		t.Errorf("the whole river paged through %d posts, want 180", len(got))
+	}
+}
+
+func TestTagFilterHeaderAndPicker(t *testing.T) {
+	f := tagged(t)
+	whole := f.get(t, "/")
+	for _, want := range []string{
+		`popovertarget="picker"`,
+		`<a href="/" aria-current="page">All posts</a>`,
+		`<a href="/?tag=tech"><span class="tag-0">#tech</span></a>`,
+		`<a href="/?tag=go"><span class="tag-1">#go</span></a>`,
+		`<a href="/?tag=News&#43;%26&#43;Notes"><span class="tag-2">#News &amp; Notes</span></a>`,
+		`<title>openfeed</title>`,
+	} {
+		if !strings.Contains(whole, want) {
+			t.Errorf("whole river lacks %q", want)
+		}
+	}
+	if strings.Contains(whole, `class="active`) || strings.Contains(whole, `filter on`) {
+		t.Error("the whole river shows an active filter")
+	}
+
+	filtered := f.get(t, "/?tag=GO")
+	for _, want := range []string{
+		`<title>#go · openfeed</title>`,
+		`<a class="active tag-1" href="/" aria-label="Show all posts, not only #go"><span>go</span>`,
+		`class="icon filter on"`,
+		`<a href="/?tag=go" aria-current="page">`,
+		`hx-post="/refresh?head=`,
+		`&amp;tag=go"`,
+	} {
+		if !strings.Contains(filtered, want) {
+			t.Errorf("filtered page lacks %q", want)
+		}
+	}
+	if strings.Contains(filtered, `<a href="/" aria-current`) {
+		t.Error("All posts is marked current in a filtered view")
+	}
+	if next := older(filtered); !strings.Contains(next, "tag=go") {
+		t.Errorf("older pages lose the filter: %q", next)
+	}
+}
+
+func TestTagFilterRejectsUnknownTags(t *testing.T) {
+	f := tagged(t)
+	if rec := f.do(t, http.MethodGet, "/?tag=sports", nil); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Errorf("an unknown tag = %d to %q", rec.Code, rec.Header().Get("Location"))
+	}
+	head, _ := f.river.Timeline(t.Context(), reader.Query{Limit: 1})
+	token, _ := head.Items[0].Position.MarshalText()
+	if rec := f.do(t, http.MethodGet, "/older?tag=sports&before="+string(token), nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("older with an unknown tag = %d", rec.Code)
+	}
+	if rec := f.do(t, http.MethodPost, "/refresh?tag=sports", http.Header{"Sec-Fetch-Site": {"same-origin"}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("refresh with an unknown tag = %d", rec.Code)
+	}
+	if body := f.get(t, "/?tag=%20"); !strings.Contains(body, `aria-current="page">All posts`) {
+		t.Error("a blank tag does not show the whole river")
+	}
+}
+
+func TestFilteredRefreshNeverReaches(t *testing.T) {
+	f := tagged(t)
+	f.refresh(t, refreshTarget(t, f.get(t, "/?tag=tech")))
+	if seen, err := f.store.SeenPosition(t.Context()); err != nil || seen != nil {
+		t.Fatalf("a filtered view saved %v, %v", seen, err)
+	}
+	f.refresh(t, refreshTarget(t, f.get(t, "/")))
+	if seen, _ := f.store.SeenPosition(t.Context()); seen == nil {
+		t.Error("the whole river did not reach")
+	}
+}
+
+func TestFilteredPillKeepsTheFilter(t *testing.T) {
+	f := tagged(t)
+	page := f.get(t, "/?tag=tech")
+	target := refreshTarget(t, page)
+	// Another process saves a newer post to the untagged gamma feed: not news to #tech.
+	saveNewer := func(feedURL, key string) {
+		t.Helper()
+		state, err := f.store.FeedState(t.Context(), feedURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := entry(key, 1000)
+		if err := f.store.SaveRefresh(t.Context(), state, store.Refresh{
+			Items:     []store.RefreshItem{{Key: e.Key, Title: e.Title, URL: e.URL, PublishedAt: e.PublishedAt}},
+			FetchedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saveNewer("https://gamma.example/feed", "gamma-new")
+	if notice := f.refresh(t, target); strings.Contains(notice, "pill") {
+		t.Error("an untagged post offers new posts in a #tech view")
+	}
+	saveNewer(alpha, "alpha-new")
+	if notice := f.refresh(t, target); !strings.Contains(notice, `<a class="pill" href="/?tag=tech">New posts ↑</a>`) {
+		t.Errorf("a new #tech post gives notice %s", notice)
+	}
+}
+
+func TestEmptyFilteredView(t *testing.T) {
+	f := newFixture(t, []config.Feed{{URL: alpha, Name: "Alpha", Tags: []string{"tech"}}}, nil)
+	if body := f.get(t, "/?tag=tech"); !strings.Contains(body, `No posts tagged #tech yet. <a href="/">Show all posts</a>`) {
+		t.Errorf("empty filtered view: %s", body)
+	}
+}
+
+func TestNoTagsNoFilter(t *testing.T) {
+	f := newFixture(t, []config.Feed{{URL: alpha, Name: "Alpha"}}, nil)
+	if body := f.get(t, "/"); strings.Contains(body, `popovertarget="picker"`) {
+		t.Error("a river without tags offers a filter")
+	}
+}
+
+func TestLink(t *testing.T) {
+	head := reader.Position{}
+	if err := head.UnmarshalText([]byte("2025-09-01T12:00:00.000000000Z~7")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		pairs []any
+		want  string
+	}{
+		{nil, "/"},
+		{[]any{"tag", ""}, "/"},
+		{[]any{"tag", "a&b c"}, "/?tag=a%26b+c"},
+		{[]any{"tag", "", "head", &head}, "/?head=2025-09-01T12%3A00%3A00.000000000Z~7"},
+		{[]any{"tag", "x", "head", (*reader.Position)(nil)}, "/?tag=x"},
+	} {
+		if got, err := link("/", tc.pairs...); err != nil || got != tc.want {
+			t.Errorf("link(%v) = %q, %v; want %q", tc.pairs, got, err, tc.want)
+		}
+	}
+	for _, bad := range [][]any{{"tag"}, {"n", 1}, {"head", &reader.Position{}}} {
+		if _, err := link("/", bad...); err == nil {
+			t.Errorf("link(%v) succeeded", bad)
 		}
 	}
 }

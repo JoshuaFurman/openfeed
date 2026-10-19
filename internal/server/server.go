@@ -42,7 +42,7 @@ var (
 	//go:embed assets templates
 	files     embed.FS
 	templates = template.Must(template.New("").Funcs(template.FuncMap{
-		"token": token,
+		"link": link,
 	}).ParseFS(files, "templates/*.html"))
 )
 
@@ -76,8 +76,8 @@ func Serve(ctx context.Context, listener net.Listener, river River, log *slog.Lo
 	return errors.Join(err, river.SaveSeen(save))
 }
 
-// New returns the server's handler. A page's launch refresh reaches the newest post it showed, as `g`
-// does in the TUI; state changes arrive only by same-origin POST.
+// New returns the server's handler. A launch refresh of the whole river reaches the newest post it showed,
+// as `g` does in the TUI, and a tag-filtered view never reaches; state changes arrive only by same-origin POST.
 func New(river River, log *slog.Logger) http.Handler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -123,6 +123,8 @@ type tag struct {
 type view struct {
 	Assets    string
 	Theme     string // "light", "dark", or empty to follow the device.
+	Tag       tag    // The filter, spelled as River.Tags lists it; its Name is empty for the whole river.
+	Tags      []tag  // The filter picker's choices.
 	Posts     []post
 	Next      *reader.Position // Older continuation; nil means no older posts for now.
 	Head      *reader.Position // The newest post shown, which a refresh checks for newer posts above.
@@ -134,8 +136,13 @@ type view struct {
 }
 
 func (h *handler) home(w http.ResponseWriter, r *http.Request) {
-	v := view{Assets: h.assets, Theme: theme(r), NoFeeds: len(h.river.Feeds()) == 0}
-	page, err := h.river.Timeline(r.Context(), reader.Query{Limit: pageSize})
+	filter, ok := h.filter(r)
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther) // A tag no feed carries any more shows the whole river.
+		return
+	}
+	v := view{Assets: h.assets, Theme: theme(r), Tag: filter, Tags: h.tags(), NoFeeds: len(h.river.Feeds()) == 0}
+	page, err := h.river.Timeline(r.Context(), reader.Query{Tag: filter.Name, Limit: pageSize})
 	if err != nil {
 		h.log.Warn("web: read river", "error", err)
 		v.ReadFail = true
@@ -146,13 +153,14 @@ func (h *handler) home(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) older(w http.ResponseWriter, r *http.Request) {
+	filter, ok := h.filter(r)
 	var before reader.Position
-	if err := before.UnmarshalText([]byte(r.URL.Query().Get("before"))); err != nil {
-		http.Error(w, "invalid position", http.StatusBadRequest)
+	if err := before.UnmarshalText([]byte(r.URL.Query().Get("before"))); err != nil || !ok {
+		http.Error(w, "invalid position or tag", http.StatusBadRequest)
 		return
 	}
-	v := view{}
-	page, err := h.river.Timeline(r.Context(), reader.Query{Before: &before, Limit: pageSize})
+	v := view{Tag: filter}
+	page, err := h.river.Timeline(r.Context(), reader.Query{Tag: filter.Name, Before: &before, Limit: pageSize})
 	if err != nil {
 		h.log.Warn("web: read older posts", "error", err)
 		v.ReadFail, v.Next = true, &before // Retrying reads the same page.
@@ -162,9 +170,14 @@ func (h *handler) older(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "posts", v)
 }
 
-// refresh reaches the newest post the page showed, runs a refresh round, and answers with the notice
-// slot: a pill when posts newer than that head exist, with the bell's failing feeds out of band.
+// refresh reaches the newest post a whole-river page showed, runs a refresh round, and answers with the
+// notice slot: a pill when posts newer than that head exist in the view, with the bell out of band.
 func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
+	filter, ok := h.filter(r)
+	if !ok {
+		http.Error(w, "unknown tag", http.StatusBadRequest)
+		return
+	}
 	var shown *reader.Position
 	if text := r.URL.Query().Get("head"); text != "" {
 		shown = new(reader.Position)
@@ -172,14 +185,16 @@ func (h *handler) refresh(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid position", http.StatusBadRequest)
 			return
 		}
-		h.reach(r.Context(), *shown)
+		if filter.Name == "" {
+			h.reach(r.Context(), *shown) // The filter hid posts below the head, so a filtered view has not passed them.
+		}
 	}
 	report, err := h.river.Refresh(r.Context())
 	if err != nil {
 		return // The client went away.
 	}
-	v := view{Alerts: alerts(report), Refreshed: true}
-	if page, err := h.river.Timeline(r.Context(), reader.Query{After: shown, Limit: 1}); err == nil {
+	v := view{Tag: filter, Alerts: alerts(report), Refreshed: true}
+	if page, err := h.river.Timeline(r.Context(), reader.Query{Tag: filter.Name, After: shown, Limit: 1}); err == nil {
 		v.Newer = len(page.Items) > 0 && shown != nil
 	} else {
 		h.log.Warn("web: check for newer posts", "error", err)
@@ -241,10 +256,35 @@ func (h *handler) theme(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "theme", view{Theme: chosen})
 }
 
+// tags lists the configured tags with their colors, in River.Tags order.
+func (h *handler) tags() []tag {
+	names := h.river.Tags()
+	list := make([]tag, len(names))
+	for i, name := range names {
+		list[i] = tag{Name: name, Color: i % tagColors}
+	}
+	return list
+}
+
+// filter is the request's tag filter as River.Tags spells it, or the zero tag for the whole river.
+// It reports false for a tag no configured feed carries.
+func (h *handler) filter(r *http.Request) (tag, bool) {
+	wanted := strings.TrimSpace(r.URL.Query().Get("tag"))
+	if wanted == "" {
+		return tag{}, true
+	}
+	for _, t := range h.tags() {
+		if strings.EqualFold(t.Name, wanted) {
+			return t, true
+		}
+	}
+	return tag{}, false
+}
+
 func (h *handler) fill(v *view, page reader.Page) {
 	colors := make(map[string]int)
-	for i, t := range h.river.Tags() {
-		colors[t] = i % tagColors
+	for _, t := range h.tags() {
+		colors[t.Name] = t.Color
 	}
 	now := time.Now()
 	for _, item := range page.Items {
@@ -281,10 +321,36 @@ func host(articleURL string) string {
 	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 }
 
-// token encodes a position for a URL; templates only receive positions from the reader.
-func token(p *reader.Position) (string, error) {
-	text, err := p.MarshalText()
-	return string(text), err
+// link builds a same-site URL from path and key/value pairs, omitting empty values. Values are strings
+// or positions, which travel as text tokens.
+func link(path string, pairs ...any) (string, error) {
+	if len(pairs)%2 != 0 {
+		return "", errors.New("link needs key/value pairs")
+	}
+	query := url.Values{}
+	for i := 0; i < len(pairs); i += 2 {
+		key, _ := pairs[i].(string)
+		switch value := pairs[i+1].(type) {
+		case string:
+			if value != "" {
+				query.Set(key, value)
+			}
+		case *reader.Position:
+			if value != nil {
+				text, err := value.MarshalText()
+				if err != nil {
+					return "", err
+				}
+				query.Set(key, string(text))
+			}
+		default:
+			return "", fmt.Errorf("link value %T", value)
+		}
+	}
+	if len(query) == 0 {
+		return path, nil
+	}
+	return path + "?" + query.Encode(), nil
 }
 
 // age is how long ago a post's river date was, in the most compact useful unit.
