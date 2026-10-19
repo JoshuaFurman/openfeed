@@ -7,19 +7,20 @@ work status and sequencing. Proposals here are not settled decisions until recor
 ## Session handoff
 
 - **Completed:** v0.1's read-only river (`v0.1.0`); adding feeds, tag filters, and the tag column in the
-  TUI; the web river (`31af99a`) and its cards, theme toggle, and failing-feeds bell (`d305f43`).
-- **Current behavior:** `openfeed serve` serves a mobile-first web river with a tag filter: a filter
-  icon opens a picker, and the header shows `#tag ×` while filtered (uncommitted).
-- **Implementation in progress: web tag filters** (see [below](#v03--web-river)). Implemented and
+  TUI; the web river (`31af99a`), its cards, theme, and bell (`d305f43`), and tag filters (`c5a77c8`).
+- **Current behavior:** `openfeed serve`'s header holds filter, bell, and a settings gear (uncommitted):
+  Theme Light / Dark / Auto, and opening articles directly or through archive.ph's latest snapshot.
+- **Implementation in progress: web settings** (see [below](#v03--web-river)). Implemented and
   verified, not yet reviewed or committed.
-- **Last verification (web tag filters):** formatting, `go vet`, `staticcheck`, uncached full race and
-  no-cgo tests. Headless Chrome at 390×844, screenshots inspected: the picker opened with All posts
-  checked and four tags in their colors; tapping `#news` loaded `/?tag=news` titled "#news · openfeed",
-  showed only lobsters posts, and scrolling loaded all 120 of them; a 40-character tag truncated in
-  the header pill and on cards without horizontal overflow; tapping the pill returned to `/`. No
-  console errors.
-- **Next action:** the user reviews on the phone. Suggested commit: `feat(web): filter the river by tag`.
-  Then adding feeds on the web, or excerpts in the TUI.
+- **Last verification (web settings):** formatting, `go vet`, `staticcheck`, uncached full race and
+  no-cgo tests. archive.ph by curl: `latest/` and `newest/` 302 to the newest snapshot, an encoded URL
+  404s, and a missing snapshot is a "No results" page. Headless Chrome at 390×844, screenshots
+  inspected: the gear menu opened with Auto and Directly chosen; Dark restyled in place with the menu
+  open; archive.ph reloaded the page with every link, including 100 scrolled-in posts, under
+  `https://archive.ph/latest/` and host lines reading `archive.ph · site ↗`; Auto then followed a dark
+  device; settings survived a reload. No console errors, no horizontal overflow.
+- **Next action:** the user reviews on the phone. Suggested commit:
+  `feat(web): settings menu with archive.ph links`. Then adding feeds on the web, or excerpts in the TUI.
 
 ### Keeping this useful
 
@@ -415,7 +416,10 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
   feeds in a header bell's popover instead of a sticky notice that covered the first card.
 - [x] Tag filters on the web (user choice B, 2026-10-19): a filter icon and popover picker, `?tag=` on
   every route, a `#tag ×` header pill, and filtered views never reaching. Long tags on cards truncate.
+- [x] Settings menu (user decisions, 2026-10-19): a gear holding Theme (Light / Dark / Auto) and Open
+  articles (Directly / Through archive.ph), per-browser cookies; the filter and bell stay in the header.
 - [ ] Tappable tag chips on cards, if wanted (offered, not chosen).
+- [ ] A `config.toml` key so the TUI's `o` can open through archive.ph too (user wants it later).
 - [ ] Adding feeds on the web: a form over `Reader.Subscribe`.
 - [ ] Excerpts in the TUI.
 
@@ -433,7 +437,10 @@ exposure, Web seen position, Web refresh, Excerpts) and [Web river](AGENTS.md#we
   one, ignores unknown values, rejects bad and cross-site posts, and redirects plain form posts; hosts
   drop `www.`. Tag filters narrow every page and older page, case-insensitively, with the picker,
   title, pill, and `#tag ×` reflecting the filter; unknown tags redirect or are 400s; filtered refreshes
-  never reach, and their pill appears only for posts in the filter and keeps it. `link` builds encoded
+  never reach, and their pill appears only for posts in the filter and keeps it. Settings: themes
+  render from the cookie, Auto and Directly delete theirs, unknown cookie values are ignored; archive.ph
+  rewrites page and older-page links unencoded, marks the host line, reloads only when the setting
+  changes, and leaves unlinked posts unlinked; empty, unknown, combined, plain, and cross-site posts. `link` builds encoded
   URLs, skipping empty values. Rendering never reaches; the refresh reaches
   the shown head, and a forged head is capped at the real one. Empty states, cross-origin POSTs
   rejected without fetching, security headers, immutable assets, templates not served, and `Serve`

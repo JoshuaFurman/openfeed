@@ -87,7 +87,7 @@ func New(river River, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /{$}", h.home)
 	mux.HandleFunc("GET /older", h.older)
 	mux.HandleFunc("POST /refresh", h.refresh)
-	mux.HandleFunc("POST /theme", h.theme)
+	mux.HandleFunc("POST /settings", h.settings)
 	mux.Handle("GET /favicon.ico", http.RedirectHandler("/assets/icon.svg?v="+h.assets, http.StatusMovedPermanently))
 	static, _ := fs.Sub(files, "assets")
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", immutable(http.FileServerFS(static))))
@@ -102,11 +102,13 @@ type handler struct {
 
 // post is one river row, holding only what the page shows.
 type post struct {
-	Title, URL, Excerpt, Feed string
-	Host                      string // The article's site, without "www.", or empty with URL.
-	Tags                      []tag
-	Date                      time.Time
-	Age                       string
+	Title, Excerpt, Feed string
+	Link                 string // Where a tap goes: the article, or its archive.ph snapshot; empty without one.
+	Host                 string // The article's site, without "www.".
+	Archived             bool   // Link goes through archive.ph.
+	Tags                 []tag
+	Date                 time.Time
+	Age                  string
 }
 
 // alert is one failing feed in the bell's list.
@@ -123,6 +125,7 @@ type tag struct {
 type view struct {
 	Assets    string
 	Theme     string // "light", "dark", or empty to follow the device.
+	Archive   bool   // Articles open through archive.ph.
 	Tag       tag    // The filter, spelled as River.Tags lists it; its Name is empty for the whole river.
 	Tags      []tag  // The filter picker's choices.
 	Posts     []post
@@ -141,7 +144,8 @@ func (h *handler) home(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther) // A tag no feed carries any more shows the whole river.
 		return
 	}
-	v := view{Assets: h.assets, Theme: theme(r), Tag: filter, Tags: h.tags(), NoFeeds: len(h.river.Feeds()) == 0}
+	prefs := preferences(r)
+	v := view{Assets: h.assets, Theme: prefs.Theme, Archive: prefs.Archive, Tag: filter, Tags: h.tags(), NoFeeds: len(h.river.Feeds()) == 0}
 	page, err := h.river.Timeline(r.Context(), reader.Query{Tag: filter.Name, Limit: pageSize})
 	if err != nil {
 		h.log.Warn("web: read river", "error", err)
@@ -159,7 +163,7 @@ func (h *handler) older(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid position or tag", http.StatusBadRequest)
 		return
 	}
-	v := view{Tag: filter}
+	v := view{Tag: filter, Archive: preferences(r).Archive}
 	page, err := h.river.Timeline(r.Context(), reader.Query{Tag: filter.Name, Before: &before, Limit: pageSize})
 	if err != nil {
 		h.log.Warn("web: read older posts", "error", err)
@@ -227,33 +231,66 @@ func alerts(report reader.Report) []alert {
 	return list
 }
 
-const themeCookie = "theme"
+const (
+	themeCookie   = "theme"
+	openCookie    = "open"
+	cookieAge     = 400 * 24 * 60 * 60 // Browsers cap cookies at 400 days.
+	archivePrefix = "https://archive.ph/latest/"
+)
 
-// theme is the request's chosen theme, or empty to follow the device.
-func theme(r *http.Request) string {
-	if c, err := r.Cookie(themeCookie); err == nil && (c.Value == "light" || c.Value == "dark") {
-		return c.Value
-	}
-	return ""
+// prefs are one browser's settings, kept in cookies.
+type prefs struct {
+	Theme   string // "light", "dark", or empty to follow the device.
+	Archive bool   // Open articles through archive.ph's latest snapshot.
 }
 
-// theme remembers the chosen theme in a cookie. htmx requests get the page's theme marker out of
-// band, so the page restyles in place; plain form posts are sent back to the river.
-func (h *handler) theme(w http.ResponseWriter, r *http.Request) {
-	chosen := r.PostFormValue("theme")
-	if chosen != "light" && chosen != "dark" {
-		http.Error(w, "unknown theme", http.StatusBadRequest)
+// preferences reads the request's settings, ignoring values the settings form could not have set.
+func preferences(r *http.Request) prefs {
+	var p prefs
+	if c, err := r.Cookie(themeCookie); err == nil && (c.Value == "light" || c.Value == "dark") {
+		p.Theme = c.Value
+	}
+	if c, err := r.Cookie(openCookie); err == nil && c.Value == "archive" {
+		p.Archive = true
+	}
+	return p
+}
+
+// settings saves one setting from the form: theme (light, dark, or auto) or open (direct or archive).
+// htmx gets the menu back, restyled in place, or a page reload when card links change; plain form posts
+// return to the river.
+func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
+	p := preferences(r)
+	reload := false
+	switch theme, open := r.PostFormValue("theme"), r.PostFormValue("open"); {
+	case theme != "" && open == "" && (theme == "light" || theme == "dark" || theme == "auto"):
+		p.Theme = strings.TrimPrefix(theme, "auto")
+		remember(w, themeCookie, p.Theme)
+	case open != "" && theme == "" && (open == "direct" || open == "archive"):
+		reload = p.Archive != (open == "archive")
+		p.Archive = open == "archive"
+		remember(w, openCookie, strings.TrimPrefix(open, "direct"))
+	default:
+		http.Error(w, "unknown setting", http.StatusBadRequest)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: themeCookie, Value: chosen, Path: "/", MaxAge: 400 * 24 * 60 * 60, // Browsers cap cookies at 400 days.
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
-	if r.Header.Get("HX-Request") != "true" {
+	switch {
+	case r.Header.Get("HX-Request") != "true":
 		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
+	case reload:
+		w.Header().Set("HX-Refresh", "true")
+	default:
+		h.render(w, "settings", view{Theme: p.Theme, Archive: p.Archive})
 	}
-	h.render(w, "theme", view{Theme: chosen})
+}
+
+// remember keeps a setting in a cookie, or forgets it when value is empty, the default.
+func remember(w http.ResponseWriter, name, value string) {
+	c := &http.Cookie{Name: name, Value: value, Path: "/", MaxAge: cookieAge, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+	if value == "" {
+		c.MaxAge = -1
+	}
+	http.SetCookie(w, c)
 }
 
 // tags lists the configured tags with their colors, in River.Tags order.
@@ -288,7 +325,10 @@ func (h *handler) fill(v *view, page reader.Page) {
 	}
 	now := time.Now()
 	for _, item := range page.Items {
-		p := post{Title: item.Title, URL: item.URL, Host: host(item.URL), Excerpt: excerpt(item.Content), Feed: item.FeedName, Date: item.EffectiveDate()}
+		p := post{Title: item.Title, Link: item.URL, Host: host(item.URL), Excerpt: excerpt(item.Content), Feed: item.FeedName, Date: item.EffectiveDate()}
+		if v.Archive && p.Link != "" {
+			p.Link, p.Archived = archivePrefix+p.Link, true // archive.ph expects the URL unencoded.
+		}
 		if p.Excerpt == strings.TrimSpace(p.Title) {
 			p.Excerpt = "" // Title-only feeds repeat the title as content.
 		}

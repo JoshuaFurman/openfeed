@@ -125,8 +125,10 @@ Open the printed address from your phone, over your home network or Tailscale. T
 newest posts, loads older ones as you scroll, and taps open the article in a new tab. Each visit
 refreshes in the background; when newer posts arrive, a "New posts ↑" button takes you to them, and
 pulling down to reload does the same. A red dot on the bell means a feed is failing to refresh; tap it
-to see which and why. The sun/moon button switches between light and dark, and each browser remembers
-its choice; until you pick one, the page follows your device. The filter icon next to the bell shows
+to see which and why. The gear opens settings: Light, Dark, or Auto (follow your device), and whether
+articles open directly or through [archive.ph](https://archive.ph)'s latest snapshot, which reads past
+many paywalls. Each browser remembers its own settings, so your phone and desktop can differ. When
+archive.ph has no snapshot yet, its page offers to archive the article. The filter icon next to the bell shows
 only one tag's feeds; the header then shows `#tag ×`, and tapping it returns to all posts. As in the
 TUI, reading a filtered view never moves "You left off here".
 

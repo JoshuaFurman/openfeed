@@ -305,46 +305,131 @@ func TestBellListsFailingFeeds(t *testing.T) {
 	}
 }
 
-func TestThemeCookie(t *testing.T) {
+// withCookies serves GET target with cookies and returns the body.
+func (f *fixture) withCookies(t *testing.T, target string, cookies ...*http.Cookie) string {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d", target, rec.Code)
+	}
+	return rec.Body.String()
+}
+
+var sameOriginForm = http.Header{"Sec-Fetch-Site": {"same-origin"}, "Content-Type": {"application/x-www-form-urlencoded"}}
+
+func TestThemeSetting(t *testing.T) {
 	f := newFixture(t, defaultFeeds(), nil)
-	same := http.Header{"Sec-Fetch-Site": {"same-origin"}, "Content-Type": {"application/x-www-form-urlencoded"}}
-	if page := f.get(t, "/"); !strings.Contains(page, `content="light dark"`) || !strings.Contains(page, `data-theme=""`) {
+	if page := f.get(t, "/"); !strings.Contains(page, `content="light dark"`) || !strings.Contains(page, `data-theme=""`) ||
+		!strings.Contains(page, `value="auto" aria-pressed="true"`) {
 		t.Error("without a cookie, the page does not follow the device")
 	}
 	for _, theme := range []string{"dark", "light"} {
-		rec := f.post(t, "/theme", "theme="+theme, same, "true")
+		rec := f.post(t, "/settings", "theme="+theme, sameOriginForm, "true")
 		cookie := rec.Result().Cookies()
-		if rec.Code != http.StatusOK || len(cookie) != 1 || cookie[0].Value != theme || !cookie[0].HttpOnly || cookie[0].MaxAge <= 0 {
-			t.Fatalf("POST /theme %s = %d, %v", theme, rec.Code, cookie)
+		if rec.Code != http.StatusOK || len(cookie) != 1 || cookie[0].Name != "theme" || cookie[0].Value != theme ||
+			!cookie[0].HttpOnly || cookie[0].MaxAge <= 0 {
+			t.Fatalf("POST theme=%s = %d, %v", theme, rec.Code, cookie)
 		}
-		if body := rec.Body.String(); !strings.Contains(body, `id="theme" class="theme" data-theme="`+theme+`"`) || strings.Contains(body, "<html") {
+		body := rec.Body.String()
+		if !strings.Contains(body, `<form id="theme" data-theme="`+theme+`"`) || !strings.Contains(body, `value="`+theme+`" aria-pressed="true"`) ||
+			strings.Contains(body, "<html") || rec.Header().Get("HX-Refresh") != "" {
 			t.Errorf("htmx theme answer = %s", body)
 		}
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-		req.AddCookie(cookie[0])
-		page := httptest.NewRecorder()
-		f.handler.ServeHTTP(page, req)
-		if body := page.Body.String(); !strings.Contains(body, `content="`+theme+`"`) || !strings.Contains(body, `data-theme="`+theme+`"`) {
+		page := f.withCookies(t, "/", cookie[0])
+		if !strings.Contains(page, `content="`+theme+`"`) || !strings.Contains(page, `data-theme="`+theme+`"`) {
 			t.Errorf("a %s cookie does not render the %s theme", theme, theme)
 		}
 	}
-	if rec := f.post(t, "/theme", "theme=dark", same, ""); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
-		t.Errorf("a plain form post = %d to %q", rec.Code, rec.Header().Get("Location"))
+	rec := f.post(t, "/settings", "theme=auto", sameOriginForm, "true")
+	if c := rec.Result().Cookies(); len(c) != 1 || c[0].Name != "theme" || c[0].MaxAge >= 0 {
+		t.Errorf("auto does not forget the theme: %v", c)
 	}
-	for _, bad := range []string{"", "theme=", "theme=blue", "theme=dark%22"} {
-		if rec := f.post(t, "/theme", bad, same, "true"); rec.Code != http.StatusBadRequest || len(rec.Result().Cookies()) != 0 {
-			t.Errorf("POST /theme %q = %d", bad, rec.Code)
+	if !strings.Contains(rec.Body.String(), `data-theme=""`) {
+		t.Error("auto does not return to the device's theme")
+	}
+	if page := f.withCookies(t, "/", &http.Cookie{Name: "theme", Value: "<script>"}); !strings.Contains(page, `data-theme=""`) {
+		t.Error("an unknown theme cookie is not ignored")
+	}
+}
+
+func TestArchiveSetting(t *testing.T) {
+	f := newFixture(t, defaultFeeds(), map[string][]feed.Item{
+		alpha: {{Key: "id:q", Title: "Query", URL: "https://www.example.com/a?b=1&c=%2F", PublishedAt: base},
+			{Key: "id:none", Title: "No link", Content: "text", PublishedAt: base.Add(-time.Hour)}},
+	})
+	populate(t, f)
+	direct := f.get(t, "/")
+	if !strings.Contains(direct, `<a class="hit" href="https://www.example.com/a?b=1&amp;c=%2F"`) || strings.Contains(direct, "archive.ph/latest") ||
+		strings.Contains(direct, `class="via"`) ||
+		!strings.Contains(direct, `value="direct" aria-pressed="true"`) {
+		t.Errorf("by default, articles do not open directly:\n%s", direct)
+	}
+
+	rec := f.post(t, "/settings", "open=archive", sameOriginForm, "true")
+	cookie := rec.Result().Cookies()
+	if rec.Code != http.StatusOK || len(cookie) != 1 || cookie[0].Name != "open" || cookie[0].Value != "archive" || rec.Header().Get("HX-Refresh") != "true" {
+		t.Fatalf("POST open=archive = %d, %v, %v", rec.Code, cookie, rec.Header())
+	}
+	archived := f.withCookies(t, "/", cookie[0])
+	for _, want := range []string{
+		`<a class="hit" href="https://archive.ph/latest/https://www.example.com/a?b=1&amp;c=%2F"`,
+		`<span class="host"><span class="via">archive.ph</span> · example.com ↗</span>`,
+		`value="archive" aria-pressed="true"`,
+	} {
+		if !strings.Contains(archived, want) {
+			t.Errorf("archive.ph page lacks %q", want)
 		}
 	}
-	if rec := f.post(t, "/theme", "theme=dark", http.Header{"Sec-Fetch-Site": {"cross-site"}}, "true"); rec.Code != http.StatusForbidden {
-		t.Errorf("cross-site theme change = %d", rec.Code)
+	if strings.Count(archived, `class="hit"`) != 1 {
+		t.Error("a post without a link gained one")
 	}
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "theme", Value: "<script>"})
-	page := httptest.NewRecorder()
-	f.handler.ServeHTTP(page, req)
-	if !strings.Contains(page.Body.String(), `data-theme=""`) {
-		t.Error("an unknown cookie value is not ignored")
+
+	// A position above every post, so the older page holds the linked one.
+	if fragment := f.withCookies(t, "/older?before="+url.QueryEscape("2999-01-01T00:00:00.000000000Z~999999"), cookie[0]); !strings.Contains(fragment, `href="https://archive.ph/latest/https://www.example.com/a`) {
+		t.Errorf("older pages ignore the setting: %s", fragment)
+	}
+
+	again := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/settings", strings.NewReader("open=archive"))
+	again.Header = sameOriginForm.Clone()
+	again.Header.Set("HX-Request", "true")
+	again.AddCookie(cookie[0])
+	unchanged := httptest.NewRecorder()
+	f.handler.ServeHTTP(unchanged, again)
+	if unchanged.Header().Get("HX-Refresh") != "" || !strings.Contains(unchanged.Body.String(), `<form id="theme"`) {
+		t.Error("choosing the current setting reloads the page")
+	}
+
+	rec = f.post(t, "/settings", "open=direct", sameOriginForm, "true")
+	if c := rec.Result().Cookies(); len(c) != 1 || c[0].Name != "open" || c[0].MaxAge >= 0 {
+		t.Errorf("direct does not forget the setting: %v", c)
+	}
+	if page := f.withCookies(t, "/", &http.Cookie{Name: "open", Value: "https://evil.example/"}); strings.Contains(page, "evil") || strings.Contains(page, "archive.ph/latest") || strings.Contains(page, `value="archive" aria-pressed`) {
+		t.Error("an unknown open cookie is not ignored")
+	}
+}
+
+func TestSettingsRejectsBadPosts(t *testing.T) {
+	f := newFixture(t, defaultFeeds(), nil)
+	if rec := f.post(t, "/settings", "theme=dark", sameOriginForm, ""); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Errorf("a plain form post = %d to %q", rec.Code, rec.Header().Get("Location"))
+	}
+	for _, bad := range []string{"", "theme=", "theme=blue", "open=wayback", "theme=dark&open=archive", "open=archive%22"} {
+		if rec := f.post(t, "/settings", bad, sameOriginForm, "true"); rec.Code != http.StatusBadRequest || len(rec.Result().Cookies()) != 0 {
+			t.Errorf("POST /settings %q = %d, %v", bad, rec.Code, rec.Result().Cookies())
+		}
+	}
+	for _, form := range []string{"theme=dark", "open=archive"} {
+		if rec := f.post(t, "/settings", form, http.Header{"Sec-Fetch-Site": {"cross-site"}}, "true"); rec.Code != http.StatusForbidden {
+			t.Errorf("cross-site %s = %d", form, rec.Code)
+		}
+	}
+	if rec := f.do(t, http.MethodPost, "/theme", sameOriginForm); rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("the old /theme route still answers: %d", rec.Code)
 	}
 }
 

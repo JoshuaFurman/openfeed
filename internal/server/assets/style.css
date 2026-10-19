@@ -1,4 +1,4 @@
-/* Colors follow the device unless the theme form chooses one; light-dark() picks by color-scheme. */
+/* Colors follow the device unless the settings form chooses a theme; light-dark() picks by color-scheme. */
 :root {
   color-scheme: light dark;
   --bg: light-dark(#eef1f3, #000000);
@@ -56,7 +56,6 @@ body {
 .title-bar { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
 .tools { display: flex; flex: none; align-items: center; gap: 0.25rem; }
 .tools .spinner { margin-right: 0.35rem; }
-.theme { display: contents; }
 
 .icon {
   position: relative;
@@ -82,15 +81,6 @@ body {
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-/* The toggle offers the theme not showing. */
-.to-light { display: none; }
-#theme[data-theme="dark"] .to-dark { display: none; }
-#theme[data-theme="dark"] .to-light { display: grid; }
-@media (prefers-color-scheme: dark) {
-  #theme:not([data-theme="light"]) .to-dark { display: none; }
-  #theme:not([data-theme="light"]) .to-light { display: grid; }
 }
 
 .badge {
@@ -146,14 +136,53 @@ body {
 }
 .alerts { width: min(22rem, calc(100vw - 1.5rem)); padding: 0.9rem 1rem; }
 
-.picker { width: min(16rem, calc(100vw - 1.5rem)); padding: 0.4rem; }
-.picker h2 {
-  margin: 0.4rem 0.6rem 0.5rem;
+.settings { width: min(18rem, calc(100vw - 1.5rem)); padding: 0.4rem 0.4rem 0.5rem; }
+.settings h2, .picker h2 {
+  margin: 0.5rem 0.6rem 0.4rem;
   color: var(--muted);
   font-size: 0.78rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+.settings button { font: inherit; color: var(--fg); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.segments {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.25rem;
+  margin: 0 0.35rem 0.6rem;
+  padding: 0.25rem;
+  border-radius: 0.7rem;
+  background: var(--chip);
+}
+.segments button {
+  padding: 0.5rem 0.3rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: none;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.segments button[aria-pressed] { background: var(--card); color: var(--fg); box-shadow: 0 1px 3px rgb(0 0 0 / 15%); }
+.choice {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  width: 100%;
+  padding: 0.65rem 0.7rem;
+  border: 0;
+  border-radius: 0.6rem;
+  background: none;
+  font-weight: 600;
+  text-align: left;
+}
+.choice small { grid-column: 1; color: var(--muted); font-size: 0.8rem; font-weight: 500; }
+.choice:active, .choice:hover { background: var(--press); }
+.choice[aria-pressed] { background: var(--chip); }
+.choice[aria-pressed]::after { content: "✓"; grid-area: 1 / 2 / 3; align-self: center; color: var(--accent); }
+.icon:focus-visible, .settings button:focus-visible { outline: 2px solid var(--accent); }
+.via { color: var(--accent); }
+
+.picker { width: min(16rem, calc(100vw - 1.5rem)); padding: 0.4rem; }
 .picker a {
   display: flex;
   justify-content: space-between;
